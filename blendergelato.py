@@ -4,14 +4,14 @@
 Name: 'Blender Gelato'
 Blender: 241
 Group: 'Render'
-Tooltip: 'Render with NVIDIA Gelato ®'
+Tooltip: 'Render with NVIDIA Gelato (R)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.8'
+__version__ = '0.9'
 __url__ = ['']
 __bpydoc__ = """\
-Blender to NVIDIA Gelato ®
+Blender to NVIDIA Gelato (R)
 """
 
 # ***** BEGIN GPL LICENSE BLOCK *****
@@ -51,17 +51,214 @@ GELATOHOME = os.getenv('GELATOHOME')
 if (GELATOHOME):
 	GELATO  = os.path.join(GELATOHOME, 'bin', 'gelato' + EXE)
 	GSOINFO = os.path.join(GELATOHOME, 'bin', 'gsoinfo' + EXE)
+	GSO_AMBOCCLUDE = os.path.join(GELATOHOME, 'shaders', 'ambocclude.gso')
 else:
 	GELATO  = 'gelato' + EXE
 	GSOINFO = 'gsoinfo' + EXE
+	GSO_AMBOCCLUDE = 'ambocclude.gso'
 
-class gelato_pyg:
+class enum_type(object):
+	def __init__(self, *args):
+		self.names = list(args)
+		for idx, name in enumerate(self.names):
+			setattr(self, name, idx)
+
+	def __len__(self):
+		return len(self.names)
+
+	def __iter__(self):
+		return enumerate(self.names)
+
+	def __contains__(self, item):
+		try:
+			dummy = self[item]
+			return True
+		except:
+			return False
+
+	def __getitem__(self, key):
+		if (type(key) == type(0)):
+			return self.names[key]
+		else:
+			return getattr(self, key)
+
+	def __str__(self):
+		return str([(self.names[idx], idx) for idx in range(len(self.names))])
+
+	def has_key(self, key):
+		return self.__contains__(key)
+
+class shader(object):
+	class parameter(object):
+		__slots__ = ['type', 'id', 'tooltip', 'widget', 'change']
+
+		def __init__(self, type, value, id, tooltip):
+			self.type    = type
+			self.id      = id
+			self.tooltip = tooltip
+			self.widget  = Blender.Draw.Create(value)
+			self.change  = False
+
+	__slots__ = ['literal', 'types', 'file', 'base_id', 'verbose', 'size', 'parameters', 'type', 'name']
+
+	def __init__(self, file, base_id, verbose = 1):
+		self.literal = enum_type('float', 'string', 'color', 'point', 'vector', 'normal', 'matrix')
+		self.types   = enum_type('surface', 'displacement', 'volume', 'light')
+
+		self.file = file
+		self.base_id = base_id
+		self.verbose = verbose
+		self.size = 200
+		self.parameters = {}
+		self.type = -1
+		self.name = None
+
+		self.parse_file()
+
+	def __len__(self):
+		return len(self.parameters)
+
+	def __iter__(self):
+		return enumerate(self.parameters.keys())
+
+	def __getitem__(self, key):
+		return self.parameters[key].widget.val
+
+	def __setitem__(self, key, value):
+		par = self.parameters[key]
+#		par.widget.val = value
+		par.widget.val = str(value)
+		par.change = True
+		Blender.Draw.Redraw(1)
+
+	def __str__(self):
+		if (self.type == -1 or (not self.name)):
+			return 'null'
+		s = ''
+		for name, par in self.parameters.iteritems():
+			if (par.change):
+				type = par.type
+				if (type == self.literal.float):
+					s = s + ('Parameter ("%s %s", %f)\n' % (self.literal[type], name, float(par.widget.val)))
+				elif (type == self.literal.string):
+					s = s + ('Parameter ("%s %s", "%s")\n' % (self.literal[type], name, par.widget.val))
+				else:
+					if (self.verbose > 1):
+						print 'Error: unknow parameter', name
+
+		s = s + ('Shader ("%s", "%s")\n' % (self.types[self.type], self.name))
+
+		return s
+
+	def set_verbose(self, verbose):
+		self.verbose = verbose
+
+	def update(self, id):
+		for k, par in self.parameters.iteritems():
+			if (par.id == id):
+				par.change = True
+				return
+
+	def gui(self, x, y, h, s):
+		Blender.BGL.glColor3f(0.0, 0.0, 0.0)
+		Blender.BGL.glRasterPos2i(x+6, y+h/2-4)
+		Blender.Draw.Text('Name: ')
+		Blender.BGL.glColor3f(1.0, 1.0, 1.0)
+		Blender.BGL.glRasterPos2i(x+Blender.Draw.GetStringWidth('Name: ')+6, y+h/2-4)
+		Blender.Draw.Text(self.name)
+		y += s
+
+		i = j = 0
+		for name, par in self.parameters.iteritems():
+			type = par.type
+			if (type == self.literal.float):
+				par.widget = Blender.Draw.String(name + ': ', par.id, x + j, y,
+					self.size, h, par.widget.val, 128, par.tooltip)
+#				par.widget = Blender.Draw.Number(name + ': ', par.id, x + j, y,
+#					self.size, h, par.widget.val, -10E6, 10E6, par.tooltip)
+				i = i + 1
+			elif (type == self.literal.string):
+				par.widget = Blender.Draw.String(name + ': ', par.id, x + j, y,
+					self.size, h, par.widget.val, 128, par.tooltip)
+				i = i + 1
+			else:
+				if (self.verbose > 1):
+					print 'Error: unknow parameter', name
+				continue
+
+			if (i % 3):
+				j = j + self.size + 10
+			else:
+				j = 0
+				y += s
+
+	def parse_file(self):
+		cmd='%s %s' % (GSOINFO, self.file)
+
+		try:
+			fd = os.popen(cmd, 'r')
+		except:
+			if (self.verbose > 0):
+				print 'Error: command', cmd
+			return
+
+		line = fd.readline().strip()
+
+		try:
+			(type, name) = line.split(' ')
+		except ValueError:
+			return
+
+		if (not self.types.has_key(type)):
+			if (self.verbose > 1):
+				print 'Error: unknow shader type', type, name
+			return
+
+		self.type = self.types[type]
+		self.name = name
+
+		i = 0
+		for line in fd:
+			elements = line.strip().split(' ')
+
+			if (not self.literal.has_key(elements[0])):
+				if (self.verbose > 1):
+					print 'Error: unknow parameter type', elements
+				continue
+
+			lit = self.literal[elements[0]]
+
+			par = None
+
+			if (lit == self.literal.float):
+				par = self.parameter(lit, elements[2], self.base_id + i, self.name + ' [float] ' + elements[1])
+#				par = self.parameter(lit, float(elements[2]), self.base_id + i, self.name + ' [float] ' + elements[1])
+			elif (lit == self.literal.string):
+				par = self.parameter(lit, elements[2][1:-1], self.base_id + i, self.name + ' [string] ' + elements[1])
+			else:
+				if (self.verbose > 1):
+					print 'Error: unknow parameter', elements
+				continue
+
+			if (par):
+				self.parameters[elements[1]] = par
+				i = i + 1
+
+		fd.close()
+
+class gelato_pyg(object):
+	"""
+	Gelato class export.
+	"""
 	def __init__(self):
 		self.PRECISION     = 5
 		self.SCALEBIAS     = 0.1
 		self.FACTORAMBIENT = 200
 
 	def head(self):
+		"""
+		Write pyg header.
+		"""
 		curcam  = self.scene.getCurrentCamera()
 
 		self.camera_name = curcam.name
@@ -135,10 +332,16 @@ class gelato_pyg:
 				self.enable_raytrace()
 
 	def tail(self):
+		"""
+		Write the posterior part of pyg file.
+		"""
 		self.file.write('\nRender ("%s")\n\n'
 			% self.camera_name)
 
 	def write_matrix(self, matrix):
+		"""
+		Write 16 elements of matrix.
+		"""
 		self.file.write('((%f, %f, %f, %f), (%f, %f, %f, %f), (%f, %f, %f, %f), (%f, %f, %f, %f))\n' % (
 			matrix[0][0], matrix[0][1], matrix[0][2], matrix[0][3],
 			matrix[1][0], matrix[1][1], matrix[1][2], matrix[1][3],
@@ -217,10 +420,14 @@ class gelato_pyg:
 		self.file.write('\nAttribute ("string geometryset", "+localocclusion")\n')
 		self.file.write('Attribute ("float occlusion:maxpixeldist", 20)\n')
 		self.file.write('Attribute ("float occlusion:maxerror", 0.2)\n')
-		self.file.write('Shader ("surface", "ambocclude", '
-				'"string occlusionname", "localocclusion", '
-				'"float samples", 512, '
-				'"float bias", 0.01)\n')
+
+		if (shader_ambocclude):
+			self.file.write(str(shader_ambocclude))
+		else:
+			self.file.write('Shader ("surface", "ambocclude", '
+					'"string occlusionname", "localocclusion", '
+					'"float samples", 512, '
+					'"float bias", 0.01)\n')
 
 	def background_color(self):
 		if (not self.world):
@@ -456,6 +663,17 @@ class gelato_pyg:
 		if (len(mesh.faces) == 0):
 			return
 
+		# get property catmull_clark
+		
+		catmull_clark = False
+		try:
+			prop = obj.getProperty('catmull_clark')
+
+			if (prop.getType() == 'BOOL'):
+				catmull_clark = prop.getData()
+		except:
+			pass
+
 		self.file.write('\nPushAttributes ()\n')
 		self.file.write('Attribute ("string name", "%s")\n' % self.instance_name(name, idx))
 
@@ -479,7 +697,10 @@ class gelato_pyg:
 		else:
 			self.set_transform(obj.matrix)
 
-		self.file.write('Mesh ("linear", (')
+		if (catmull_clark):
+			self.file.write('Mesh ("catmull-clark", (')
+		else:
+			self.file.write('Mesh ("linear", (')
 
 		nlist = []
 		for face in mesh.faces:
@@ -514,7 +735,7 @@ class gelato_pyg:
 				round(vert.co.z, self.PRECISION)))
 		self.file.write(', '.join(nlist))
 
-		if (smooth):
+		if (smooth and (not catmull_clark)):
 			for face in mesh.faces:
 				if (face.smooth):
 					continue
@@ -536,7 +757,7 @@ class gelato_pyg:
 		self.file.write('PopAttributes ()\n')
 
 	def visible(self, obj):
-		if ((obj.users > 1) and  (set(obj.layers) & self.viewlayer == set([]))):
+		if ((obj.users > 1) and  (set(obj.layers) & self.viewlayer == set())):
 			if (self.verbose > 1):
 				print 'Info: Object', obj.name, 'invisible'
 			return False
@@ -700,6 +921,9 @@ class gelato_pyg:
 		# no all lights
 		self.no_all_lights = gui_no_all_lights.val
 
+		# shader ambocclude
+		shader_ambocclude.set_verbose(self.verbose)
+
 	def export(self, scene):
 		self.scene = scene
 
@@ -712,7 +936,7 @@ class gelato_pyg:
 		try:
 			self.file = open(self.filename, 'w')
 		except IOError:
-			Draw.PupMenu('Error: cannot write file' + self.filename)
+			Blender.Draw.PupMenu('Error:%t|cannot write file' + self.filename)
 			return
 
 		self.viewlayer = set(Blender.Window.ViewLayer())
@@ -738,7 +962,6 @@ class gelato_pyg:
 		if (self.verbose > 0):
 			print 'Info: finished Gelato pyg export (%.2fs)' % (Blender.sys.time() - timestart)
 
-
 # Persistent data
 
 KEYREGISTER = 'BlenderGelato'
@@ -751,6 +974,8 @@ def default_value():
 	global gui_lights_factor, gui_gamma, gui_gain, gui_maxdepth
 	global gui_shadow_maps, gui_dynamic_shadows, gui_raytrace_shadows
 	global gui_all_double_sided, gui_no_all_lights
+
+	global shader_ambocclude
 
 	try:
 		blend_file_name = Blender.Get('filename')
@@ -786,13 +1011,27 @@ def default_value():
 	gui_all_double_sided  = Blender.Draw.Create(0)
 	gui_no_all_lights     = Blender.Draw.Create(0)
 
+	# shader
+
+	try:
+		shader_ambocclude = shader(GSO_AMBOCCLUDE, 5000)
+	except:
+		shader_ambocclude = None
+
+	if (shader_ambocclude):
+		shader_ambocclude['samples'] = 512
+		shader_ambocclude['occlusionname'] = 'localocclusion'
+		shader_ambocclude['bias'] = 0.01
+
 default_value()
 
 def update_registry():
+	global shader_ambocclude
+	
 	d = {
 		'filename'          : gui_filename.val,
-		'gui_beauty'        : gui_beauty.val,
-		'gui_shadows'       : gui_shadows.val,
+		'beauty'            : gui_beauty.val,
+		'shadows'           : gui_shadows.val,
 		'ambient_occlusion' : gui_ambient_occlusion.val,
 		'format'            : gui_format.val,
 		'data'              : gui_data.val,
@@ -815,6 +1054,7 @@ def update_registry():
 		'all_double_sided'  : gui_all_double_sided.val,
 		'no_all_lights'     : gui_no_all_lights.val,
 	}
+
 	Blender.Registry.SetKey(KEYREGISTER, d, True)
 
 rdict = Blender.Registry.GetKey(KEYREGISTER, True)
@@ -844,23 +1084,41 @@ if (rdict):
 		gui_key_fill_rim.val      = rdict['key_fill_rim']
 		gui_all_double_sided.val  = rdict['all_double_sided']
 		gui_no_all_lights.val     = rdict['no_all_lights']
+
 	except:
 		update_registry()
 
+def set_property_catmull_clark():
+	for obj in Blender.Object.GetSelected():
+		type = obj.getType()
+		if ((type != 'Mesh') and (type != 'Surf')):
+			continue
+		try:
+			try:
+				prop = obj.getProperty('catmull_clark')
+				obj.removeProperty(prop)
+			except:
+				pass
+        
+			obj.addProperty('catmull_clark', 1, 'BOOL')
+		except:
+			pass
+
 # GUI
 
-ID_BUTTON_SAVE       = 1000
-ID_BUTTON_RENDER     = 1001
-ID_FILENAME          = 1002
-ID_SELECT            = 1003
-ID_BUTTON_DEFAULT    = 1004
-ID_BUTTON_EXIT       = 1005
-ID_BUTTON_SHADOWMAPS = 1006
-ID_BUTTON_DYNAMIC    = 1007
-ID_BUTTON_RAYTRACE   = 1008
-ID_BUTTON_BEAUTY     = 1009
-ID_BUTTON_SHADOWS    = 1010
-ID_BUTTON_AO         = 1011
+ID_BUTTON_SAVE          = 1000
+ID_BUTTON_RENDER        = 1001
+ID_FILENAME             = 1002
+ID_SELECT               = 1003
+ID_BUTTON_DEFAULT       = 1004
+ID_BUTTON_EXIT          = 1005
+ID_BUTTON_SHADOWMAPS    = 1006
+ID_BUTTON_DYNAMIC       = 1007
+ID_BUTTON_RAYTRACE      = 1008
+ID_BUTTON_BEAUTY        = 1009
+ID_BUTTON_SHADOWS       = 1010
+ID_BUTTON_AO            = 1011
+ID_BUTTON_CATMULL_CLARK = 1012
 
 convert_data        = ['rgb', 'rgba', 'z', 'avgz', 'volz']
 convert_bucketorder = ['horizontal', 'vertical', 'spiral']
@@ -908,6 +1166,8 @@ def handle_button_event(evt):
 	elif (evt == ID_BUTTON_RAYTRACE):
 		gui_shadow_maps.val = 0
 		gui_dynamic_shadows.val = 0
+	elif (evt == ID_BUTTON_CATMULL_CLARK):
+		set_property_catmull_clark()
 	elif (evt == ID_BUTTON_RENDER):
 		pyg.export(Blender.Scene.GetCurrent())
 		if (os.path.isfile(gui_filename.val)):
@@ -918,6 +1178,8 @@ def handle_button_event(evt):
 
 	if (gui_format.val == 0):
 		gui_preview.val = 1
+
+	shader_ambocclude.update(evt)
 
 	update_registry()
 	Blender.Draw.Redraw(1)
@@ -1026,12 +1288,12 @@ def draw_gui():
 		90, h, gui_antialiasing_y.val, 1, 16, 'Set spatial antialiasing y')
 	x += 95
 
-	gui_gamma = Blender.Draw.Slider('Gamma: ', 1, x, y,
-		180, h, gui_gamma.val, 0.1, 10.0, 0, 'Image gamma')
-	x += 185
+	gui_gamma = Blender.Draw.Number('Gamma: ', 1, x, y,
+		100, h, gui_gamma.val, 0.0, 10.0, 'Image gamma')
+	x += 105
 
-	gui_gain = Blender.Draw.Slider('Gain: ', 1, x, y,
-		180, h, gui_gain.val, 0.1, 10.0, 0, 'Image gain')
+	gui_gain = Blender.Draw.Number('Gain: ', 1, x, y,
+		100, h, gui_gain.val, 0.0, 10.0, 'Image gain')
 
 	x = x0
 	y += s
@@ -1058,12 +1320,12 @@ def draw_gui():
 		130, h, gui_filter.val, 'Pixel filter')
 	x += 135
 
-	gui_filterwidth_x = Blender.Draw.Slider('Filter X: ', 1, x, y,
-		170, h, gui_filterwidth_x.val, 0.0, 32.0, 0, 'Set filter width x')
-	x += 175
+	gui_filterwidth_x = Blender.Draw.Number('Filter X: ', 1, x, y,
+		120, h, gui_filterwidth_x.val, 0.0, 32.0, 'Set filter width x')
+	x += 125
 
-	gui_filterwidth_y = Blender.Draw.Slider('Filter Y: ', 1, x, y,
-		170, h, gui_filterwidth_y.val, 0.0, 32.0, 0, 'Set filter width y')
+	gui_filterwidth_y = Blender.Draw.Number('Filter Y: ', 1, x, y,
+		120, h, gui_filterwidth_y.val, 0.0, 32.0, 'Set filter width y')
 
 	x = x0
 	y += s
@@ -1071,12 +1333,25 @@ def draw_gui():
 	# line
 
 	gui_lights_factor = Blender.Draw.Slider('Lights factor: ', 1, x, y,
-		240, h, gui_lights_factor.val, 0.0, 1000.0, 0, 'Set lights factor')
-	x += 245
+		255, h, gui_lights_factor.val, 0.0, 1000.0, 0, 'Set lights factor')
+	x += 260
 
 	gui_maxdepth = Blender.Draw.Number('maxdepth: ', 1, x, y,
-		110, h, gui_maxdepth.val, 0, 16, 'Raytrace maxdepth')
+		120, h, gui_maxdepth.val, 0, 16, 'Raytrace maxdepth')
 
+	x = x0
+	y += s
+
+	# line
+	
+	Blender.BGL.glColor3f(0.0, 0.0, 0.0)
+	Blender.BGL.glRasterPos2i(x+6, y+h/2-4)
+	Blender.Draw.Text('Property:')
+	x += 75
+
+	Blender.Draw.PushButton('catmull_clark', ID_BUTTON_CATMULL_CLARK, x, y,
+		130, h, 'Enable catmull-clark property')
+	
 	x = x0
 	y += s
 
@@ -1115,14 +1390,14 @@ def draw_gui():
 		x += 130
 
 		gui_dynamic_shadows = Blender.Draw.Toggle('Dynamic', ID_BUTTON_DYNAMIC, x, y,
-			130, h, gui_dynamic_shadows.val, 'Enable dynamic shadows')
+			130, h, gui_dynamic_shadows.val, 'Enable Dynamic shadows')
 		x += 130
 
 		gui_raytrace_shadows = Blender.Draw.Toggle('Raytrace', ID_BUTTON_RAYTRACE, x, y,
 			130, h, gui_raytrace_shadows.val, 'Enable Raytrace shadows')
 
-	x = x0
-	y += s
+		x = x0
+		y += s
 
 	# line
 
@@ -1144,8 +1419,8 @@ def draw_gui():
 		gui_all_double_sided = Blender.Draw.Toggle('All double sided', 0, x, y,
 			120, h, gui_all_double_sided.val, 'Enable all double sided faces')
 
-	x = x0
-	y += s
+		x = x0
+		y += s
 
 	# line
 
@@ -1160,8 +1435,12 @@ def draw_gui():
 			60, h, gui_no_all_lights.val, 'Disable all lights')
 		x += 65
 
+	if (gui_ambient_occlusion.val):
+		shader_ambocclude.gui(x, y, h, s)
+
 # main
 
 pyg = gelato_pyg()
+
 Blender.Draw.Register(draw_gui, handle_event, handle_button_event)
 
