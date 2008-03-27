@@ -2,14 +2,14 @@
 
 """
 Name: 'Blender Gelato'
-Blender: 243
+Blender: 244
 Group: 'Render'
 Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.14'
-__url__ = ['']
+__version__ = '0.15'
+__url__ = ['http://wiki.blender.org/index.php/Scripts/Catalog/Render#blendergelato']
 __bpydoc__ = """\
 Blender to NVIDIA Gelato(TM)
 """
@@ -17,7 +17,7 @@ Blender to NVIDIA Gelato(TM)
 # NVIDIA Gelato(TM) Exporter
 #
 # Original By: Mario Ambrogetti
-# Date:        Tue, 20 Feb 2007 15:44:03 +0100
+# Date:        Thu, 24 May 2007 13:25:46 +0200
 #
 # ***** BEGIN GPL LICENSE BLOCK *****
 #
@@ -40,15 +40,21 @@ Blender to NVIDIA Gelato(TM)
 # ***** END GPL LICENCE BLOCK *****
 
 import Blender
-import sys, os, re, datetime, getpass, fnmatch, struct, copy
+import sys, os, math, tempfile, struct
+import re, datetime, fnmatch, copy
 import xml.dom.minidom
-from math import degrees, radians, atan2
 
 try:
 	import xml.dom.ext
 	USE_XML_DOM_EXT = True
 except:
 	USE_XML_DOM_EXT = False
+
+try:
+	import getpass
+	USE_GETPASS = True
+except:
+	USE_GETPASS = False
 
 class GelatoError(Exception):
 	def __init__(self, message):
@@ -83,6 +89,40 @@ class enum_type(object):
 
 	def has_key(self, key):
 		return self.__contains__(key)
+
+class open_temp_rename(object):
+	__slots__ = ['filename', 'tmpname', 'fd']
+
+	"""
+	Open unique temporary filename.
+	It will be renamed to true name and destroyed as soon as it is closed.
+	"""
+	def __init__(self, filename, mode = 'r', bufsize = -1):
+		self.filename = filename
+		dir = os.path.dirname(filename)
+		(base, ext) = os.path.splitext(filename)
+
+		(handle, self.tmpname) = tempfile.mkstemp(ext, 'gelato', dir)
+
+		self.fd = os.fdopen(handle, mode, bufsize)
+
+	def __del__(self):
+		global WIN
+
+		try:
+			self.fd.close()
+		except:
+			sys.excepthook(*sys.exc_info())
+
+		if (WIN and os.path.exists(self.filename)):
+			try:
+				os.unlink(self.filename)
+			except:
+				pass
+		try:
+			os.rename(self.tmpname, self.filename)
+		except:
+			sys.excepthook(*sys.exc_info())
 
 class shader(object):
 	class parameter(object):
@@ -127,7 +167,7 @@ class shader(object):
 		self.verbose    = verbose
 		self.size       = 210
 		self.parameters = {}
-		self.type       = -1
+		self.type       = None
 		self.name       = None
 
 		self.widget_enable_sss = Blender.Draw.Create(0)
@@ -182,7 +222,7 @@ class shader(object):
 		Blender.Draw.Redraw(1)
 
 	def __str__(self):
-		if (self.type == -1 or (not self.name)):
+		if ((self.type is None) or (not self.name)):
 			if (self.verbose > 1):
 				print 'Error: null shader'
 			return ''
@@ -242,19 +282,18 @@ class shader(object):
 
 		ty = self.type
 
-		# Shader: surface, displacement, volume
+		# Shader: surface, displacement, volume, generic
 
 		if ((ty is self.types.surface) or
 			(ty is self.types.displacement) or
-			(ty is self.types.volume)):
+			(ty is self.types.volume) or
+			(ty is self.types.generic)):
 				slist.append('Shader ("%s", "%s")\n' % (self.types[ty], self.name))
 
 		# Light
 
 		elif (ty is self.types.light):
 			slist.append('Light ("%s", "%s")\n' % (self.nameid, self.name))
-
-		# TODO generic
 
 		else:
 			if (self.verbose > 1):
@@ -285,7 +324,8 @@ class shader(object):
 		Blender.BGL.glColor3f(1.0, 1.0, 1.0)
 
 		y += s
-		i = j = 0
+		i = 0
+		j = 0
 
 		for name in sorted(self.parameters, key=str.lower, reverse=True):
 			par = self.parameters[name]
@@ -432,9 +472,12 @@ class shader(object):
 
 		# file
 
+		(directory, filename) = os.path.split(self.file)
+
 		el = document.createElement('file')
 		root.appendChild(el)
-		el.appendChild(document.createTextNode(self.file))
+		el.appendChild(document.createTextNode(filename))
+		el.setAttribute('directory', directory)
 
 		# nameid
 
@@ -465,8 +508,17 @@ class shader(object):
 		if (len(el) == 0):
 			return False
 
-		el[0].normalize()
-		fd = el[0].firstChild.data.strip()
+		dfile = el[0]
+		dfile.normalize()
+
+		filename = dfile.firstChild.data.strip()
+		directory = dfile.getAttribute('directory')
+		shfile =  os.path.join(directory, filename)
+
+		if (not os.path.exists(shfile)):
+			fd = search_file(filename, permanents['path_shader'].val)
+			if (fd):
+				shfile = fd
 
 		# nameid
 
@@ -479,7 +531,7 @@ class shader(object):
 		# re-init object
 
 		try:
-			self.__init__(fd, nid)
+			self.__init__(shfile, nid)
 		except:
 			return False
 
@@ -761,7 +813,7 @@ class gelato_pyg(object):
 			self.file.write('Shader ("surface", "ambocclude", "string occlusionname", "localocclusion")\n')
 
 	def write_ambient_occlusion_pass2(self):
-		global materials_assign
+		global materials_assign, lights_assign
 
 		if (not self.format):
 			raise GelatoError, 'No output format'
@@ -770,7 +822,7 @@ class gelato_pyg(object):
 
 		self.file.write('\n')
 
-		shader_environment_light = materials_assign[0]['environment_light']
+		shader_environment_light = lights_assign[0]['environment_light']
 		if (shader_environment_light):
 			shader_environment_light['occlusionmap'] = output
 
@@ -784,13 +836,13 @@ class gelato_pyg(object):
 				output)
 
 	def write_indirect_light(self):
-		global materials_assign
+		global lights_assign
 
 		self.file.write('\nAttribute ("string geometryset", "+indirect")\n')
 		self.file.write('Attribute ("int indirect:minsamples", %d)\n' %
 			self.indirect_minsamples)
 
-		shader_indirect_light = materials_assign[0]['indirect_light']
+		shader_indirect_light = lights_assign[0]['indirect_light']
 		if (shader_indirect_light):
 			self.file.write(str(shader_indirect_light))
 		else:
@@ -890,8 +942,8 @@ class gelato_pyg(object):
 			self.object_name(name),
 			lamp.getEnergy() * self.lights_factor,
 			lamp.R, lamp.G, lamp.B,
-			radians(lamp.spotSize / 2.0),
-			radians(lamp.spotBlend * lamp.spotSize / 4.0),
+			math.radians(lamp.spotSize / 2.0),
+			math.radians(lamp.spotBlend * lamp.spotSize / 4.0),
 			float(lamp.samples),
 			lamp.bias * self.SCALEBIAS))
 
@@ -933,6 +985,19 @@ class gelato_pyg(object):
 
 			if (driver == 'iv'):
 				self.file.write('Parameter ("int remote", 1)\n')
+
+			if (self.enable_stereo and self.on_beauty):
+				(base, ext) = os.path.splitext(output_name)
+
+				if (self.files_extensions):
+					(base, ext2) = os.path.splitext(base)
+					ext = ext2 + ext
+
+				self.file.write('Parameter ("string stereo:left", "%s")\n' %
+					(base + '-left' + ext))
+
+				self.file.write('Parameter ("string stereo:right", "%s")\n' %
+					(base + '-right' + ext))
 
 		self.file.write('Output ("%s", "%s", "%s", "%s")\n' %
 			(output_name, driver, data, camera_name))
@@ -976,7 +1041,7 @@ class gelato_pyg(object):
 			else:
 				fac = 1.0
 
-			fov = degrees(2.0 * atan2(16.0 * fac, cam.lens))
+			fov = math.degrees(2.0 * math.atan2(16.0 * fac, cam.lens))
 
 			self.file.write('Attribute ("string projection", "perspective")\n')
 			self.file.write('Attribute ("float fov", %s)\n' %
@@ -999,7 +1064,9 @@ class gelato_pyg(object):
 		self.file.write('Attribute ("float pixelaspect", %s)\n' %
 			(1.0 / ratio))
 
-		if (self.enable_dof):
+		# Depth of Field
+
+		if (self.enable_dof and self.on_beauty):
 			self.file.write('Attribute ("int dofquality", %d)\n' %
 				self.dofquality)
 
@@ -1013,6 +1080,32 @@ class gelato_pyg(object):
 
 			self.file.write('Attribute ("float focaldistance", %s)\n' %
 				cam.dofDist)
+
+		# Motion Blur
+
+		if (self.enable_motion_blur and self.on_beauty):
+			self.file.write('Attribute ("int temporalquality", %s)\n' %
+				self.temporalquality)
+
+			self.file.write('Attribute ("float[2] shutter", (%s, %s))\n' %
+				(self.shutter_open, self.shutter_close))
+
+		# Stereo camera
+
+		if (self.enable_stereo and self.on_beauty):
+			self.file.write('Attribute ("float stereo:separation", %s)\n' %
+				float(self.stereo_separation))
+
+			self.file.write('Attribute ("float stereo:convergence", %s)\n' %
+				float(self.stereo_convergence))
+
+			self.file.write('Attribute ("string stereo:projection", "%s")\n' %
+				self.stereo_projection)
+
+			self.file.write('Attribute ("string stereo:shade", "%s")\n' %
+				self.stereo_shade)
+
+		# Camera
 
 		self.file.write('Camera ("%s")\n' %
 			name)
@@ -1107,6 +1200,10 @@ class gelato_pyg(object):
 		else:
 			wfile = self.file
 
+		if (self.verbose > 0):
+			wfile.write('## Points: %s\n' % len(points))
+			wfile.write('## Faces:  %s\n' % len(nverts))
+
 		wfile.write('Mesh ("%s"' % interpolation)
 
 		self.write_array(wfile, nverts,      ',', True)
@@ -1123,7 +1220,7 @@ class gelato_pyg(object):
 		if (self.enable_split):
 			wfile.close()
 
-	def camera_shadows(self, obj, matrix = None):
+	def camera_shadows(self, obj, matrices):
 		type = obj.type
 		if (type != 'Lamp'):
 			return
@@ -1131,10 +1228,10 @@ class gelato_pyg(object):
 		name = obj.name
 		lamp = Blender.Lamp.Get(obj.getData().name)
 
-		if (matrix):
-			mat = matrix
+		if (len(matrices) == 1):
+			mat = matrices[0]
 		else:
-			mat = obj.matrix
+			raise GelatoError, sys._getframe(0).f_code.co_name +' invalid number of items of input matrices'
 
 		ltype = lamp.type
 		if (ltype is Blender.Lamp.Types.Spot or
@@ -1142,7 +1239,7 @@ class gelato_pyg(object):
 			ltype is Blender.Lamp.Types.Lamp):
 				self.write_camera_light(obj, lamp, name, mat)
 
-	def light(self, obj, matrix = None):
+	def light(self, obj, matrices):
 		type = obj.type
 		if (type != 'Lamp'):
 			return
@@ -1150,10 +1247,10 @@ class gelato_pyg(object):
 		name = obj.name
 		lamp = Blender.Lamp.Get(obj.getData().name)
 
-		if (matrix):
-			mat = matrix
+		if (len(matrices) == 1):
+			mat = matrices[0]
 		else:
-			mat = obj.matrix
+			raise GelatoError, sys._getframe(0).f_code.co_name + ' invalid number of items of input matrices'
 
 		ltype = lamp.type
 		if (ltype is Blender.Lamp.Types.Lamp):
@@ -1163,7 +1260,7 @@ class gelato_pyg(object):
 		elif (ltype is Blender.Lamp.Types.Spot):
 			self.write_spotlight(obj, lamp, mat)
 
-	def mesh(self, obj, matrix = None):
+	def mesh(self, obj, matrices):
 		global materials_assign
 
 		type = obj.type
@@ -1225,8 +1322,7 @@ class gelato_pyg(object):
 		verts = []
 		db_geometry = {}
 
-		i = 0
-		for face in mesh.faces:
+		for i, face in enumerate(mesh.faces):
 			if (face.smooth):
 				smooth = True
 
@@ -1247,7 +1343,6 @@ class gelato_pyg(object):
 				for j in xrange(len(face.v)):
 					c = face.col[j]
 					nlist_col[face.v[j].index] = [c.r, c.g, c.b]
-			i += 1
 
 		# points
 
@@ -1287,10 +1382,24 @@ class gelato_pyg(object):
 
 		# transform
 
-		if (matrix):
-			self.write_set_transform(matrix)
+		l = len(matrices)
+		if (l == 1):
+
+			self.write_set_transform(matrices[0])
+
+		elif (l == 2) :
+
+			# motion blur
+
+			self.file.write('Motion (%s, %s)\n' %
+				(self.shutter_open, self.shutter_close))
+
+			self.write_set_transform(matrices[0])
+			self.write_set_transform(matrices[1])
 		else:
-			self.write_set_transform(obj.matrix)
+			raise GelatoError, sys._getframe(0).f_code.co_name + ' invalid number of items of input matrices'
+
+		# bake diffuse
 
 		if (bake_diffuse and self.on_bake_diffuse):
 			self.file.write('Attribute ("int cull:occlusion", 0)\n')
@@ -1376,13 +1485,13 @@ class gelato_pyg(object):
 							if (not image):
 								continue
 							filename = Blender.sys.expandpath(image.getFilename())
-							if (mtex.mapto is Blender.Texture.MapTo.COL):
+							if (mtex.mapto & Blender.Texture.MapTo.COL):
 								textures_color.append(self.data_texture(mtex.tex.getName(),
 									filename,
 									mtex.mapping,
 									mtex.tex.extend,
 									mtex.texco))
-								if (mtex.texco is Blender.Texture.TexCo.UV):
+								if (mtex.texco & Blender.Texture.TexCo.UV):
 									use_uv = True
 
 				# UV coordinates (FIXME)
@@ -1400,7 +1509,7 @@ class gelato_pyg(object):
 
 				# shader surface (FIXME)
 
-				if (self.enable_textures and textures_color):
+				if (self.enable_textures and textures_color and self.on_beauty):
 					self.file.write('ShaderGroupBegin ()\n')
 
 					for ftex in textures_color:
@@ -1428,16 +1537,17 @@ class gelato_pyg(object):
 
 								self.file.write(str(sd))
 						else:
+							# default plastic
 							self.file.write('Shader ("surface", "plastic")\n')
 
-				if (self.enable_textures and textures_color):
+				if (self.enable_textures and textures_color and self.on_beauty):
 					self.file.write('ShaderGroupEnd ()\n')
 
 				# FIXME MA_ONLYCAST ???
 				if (flags & 0x2000):
 					self.file.write('Attribute ("string geometryset", "-camera")\n')
 
-				if (not flags & Blender.Material.Modes.TRACEABLE):
+				if (not (flags & Blender.Material.Modes.TRACEABLE)):
 					self.file.write('Attribute ("string geometryset", "-shadows")\n')
 
 				if (flags & Blender.Material.Modes.TRANSPSHADOW):
@@ -1468,17 +1578,19 @@ class gelato_pyg(object):
 		self.file.write('PopAttributes ()\n')
 
 	def visible(self, obj):
-		if ((obj.users > 1) and ((set(obj.layers) & self.viewlayer) == set())):
+		if ((obj.users > 1) and ((frozenset(obj.layers) & self.viewlayer) == frozenset())):
 			if (self.verbose > 1):
 				print 'Info: Object "%s" invisible' % obj.name
 			return False
 		return True
 
-	def build(self, obj, method):
+	def build(self, obj, method, mblur = False):
 		if (not self.visible(obj)):
 			return
 
 		self.instance = None
+
+		mb = mblur and self.on_beauty
 
 		if (self.dup_verts):
 			try:
@@ -1488,10 +1600,24 @@ class gelato_pyg(object):
 				dupobjs = None
 
 			if (dupobjs):
+
 				self.instance = 0
-				for dobj, mat in dupobjs:
-					exec('self.%s(dobj, mat)' % method)
-					self.instance += 1
+
+				# check is motion blur
+				if (mb):
+					(matrix_start, matrix_end) = self.shutter_matrices(obj, True)
+
+					for dobj, mat in dupobjs:
+
+						matrices = self.interpolation_motion_blur(matrix_start[self.instance], \
+							matrix_end[self.instance])
+						exec('self.%s(dobj, matrices)' % method)
+
+						self.instance += 1
+				else:
+					for dobj, mat in dupobjs:
+						exec('self.%s(dobj, [mat])' % method)
+						self.instance += 1
 				return
 			else:
 				try:
@@ -1501,7 +1627,14 @@ class gelato_pyg(object):
 				except:
 					pass
 
-		exec('self.%s(obj)' % method)
+		# check is motion blur
+		if (mb):
+			(matrix_start, matrix_end) = self.shutter_matrices(obj)
+			matrices = self.interpolation_motion_blur(matrix_start, matrix_end)
+		else:
+			matrices = [obj.matrix]
+
+		exec('self.%s(obj, matrices)' % method)
 
 	def cameras_shadows(self):
 		for obj in self.objects:
@@ -1516,11 +1649,9 @@ class gelato_pyg(object):
 		Blender.Window.DrawProgressBar(0.0, bar)
 
 		n = float(len(self.objects))
-		i = 0
-		for obj in self.objects:
+		for i, obj in enumerate(self.objects):
 			self.build(obj, 'light')
-			Blender.Window.DrawProgressBar(i / n, bar)
-			i += 1
+			Blender.Window.DrawProgressBar(float(i) / n, bar)
 
 	def geometries(self):
 		bar = 'Geometries ...'
@@ -1530,31 +1661,39 @@ class gelato_pyg(object):
 		Blender.Window.DrawProgressBar(0.0, bar)
 
 		n = float(len(self.objects))
-		i = 0
-		for obj in self.objects:
+		for i, obj in enumerate(self.objects):
 			if (self.verbose > 1):
 				print 'Info: Object "%s" type "%s"' % (obj.name, obj.type)
-			self.build(obj, 'mesh')
-			Blender.Window.DrawProgressBar(i / n, bar)
-			i += 1
+			self.build(obj, 'mesh', self.enable_motion_blur)
+			Blender.Window.DrawProgressBar(float(i) / n, bar)
 
 	def write_head(self):
 		"""
 		Write pyg header.
 		"""
 
-		curcam  = self.scene.getCurrentCamera()
+		# get camera
+
+		try:
+			curcam = self.scene.objects.camera
+		except:
+			curcam  = self.scene.getCurrentCamera()	# deprecated
 
 		try:
 			self.camera_name = curcam.name
 		except:
 			raise GelatoError, 'No camera present'
 
-		scale  = self.context.getRenderWinSize() / 100.0
+		scale = self.context.getRenderWinSize() / 100.0
+
+		# banner
 
 		self.file.write('## Exported by Blender Gelato %s\n##\n' % __version__)
 		self.file.write(datetime.datetime.today().strftime('## Timestamp: %Y-%m-%d %H:%M:%S\n'))
-		self.file.write('## User: %s\n' % getpass.getuser())
+
+		if (USE_GETPASS):
+			self.file.write('## User: %s\n' % getpass.getuser())
+
 		self.file.write('## Platform: %s\n' % sys.platform)
 
 		if (self.on_beauty):
@@ -1574,20 +1713,18 @@ class gelato_pyg(object):
 			self.file.write('## Frame: %d/%d\n' %
 				(self.frame, self.nframes))
 
+		# verbose
 
 		self.file.write('\nAttribute ("int verbosity", %d)\n' %
 			self.verbose)
 
-		if (self.enable_textures):
-			self.file.write('Attribute ("int limits:texturememory", %d)\n' %
-				int(self.limits_texturememory))
+		# error filename
 
-			self.file.write('Attribute ("int limits:texturefiles", %d)\n' %
-				int(self.limits_texturefiles))
-
-		if (self.enable_error):
+		if (self.enable_error and self.errorfilename):
 			self.file.write('Attribute ("string error:filename", "%s")\n' %
 				fix_file_name(self.errorfilename))
+
+		# paths
 
 		if (self.path_shader):
 			self.file.write('Attribute ("string path:shader", "%s")\n' %
@@ -1609,8 +1746,12 @@ class gelato_pyg(object):
 			self.file.write('Attribute ("string path:generator", "%s")\n' %
 				fix_file_name(fix_vars(self.path_generator)))
 
+		# resolution X Y
+
 		self.file.write('Attribute ("int[2] resolution", (%d, %d))\n' %
 			(int(self.sizex * scale), int(self.sizey * scale)))
+
+		# border render
 
 		if (self.context.borderRender):
 			self.file.write('Attribute ("float[4] crop", (%s, %s, %s, %s))\n' % (
@@ -1620,16 +1761,24 @@ class gelato_pyg(object):
 				1.0 - self.context.border[1]))
 #			self.file.write('Attribute ("int rerender", 1)\n')
 
+		# antialiasing
+
 		self.file.write('Attribute ("int[2] spatialquality", (%d, %d))\n' %
 			(self.antialiasing_x , self.antialiasing_y))
+
+		# preview
 
 		if (self.enable_preview):
 			self.file.write('Attribute ("float preview", %s)\n' %
 				round(self.preview_quality, self.PRECISION))
 
+		# shading
+
 		if (self.enable_shaders):
 			self.file.write('Attribute ("float shadingquality", %s)\n' %
 				round(self.shadingquality, self.PRECISION))
+
+		#  bucket
 
 		self.file.write('Attribute ("int[2] limits:bucketsize", (%d, %d))\n' %
 			(self.bucketsize_x , self.bucketsize_y))
@@ -1637,12 +1786,24 @@ class gelato_pyg(object):
 		self.file.write('Attribute ("string bucketorder", "%s")\n' %
 			self.bucketorder)
 
+		# mesh
+
 		self.file.write('Attribute ("string orientation", "outside")\n')
 		self.file.write('Attribute ("int twosided", 1)\n')
+
+		# textures
 
 		if (self.enable_textures):
 			self.file.write('Attribute ("int texture:automipmap", %d)\n' %
 				self.enable_automipmap)
+
+			self.file.write('Attribute ("int limits:texturememory", %d)\n' %
+				int(self.limits_texturememory))
+
+			self.file.write('Attribute ("int limits:texturefiles", %d)\n' %
+				int(self.limits_texturefiles))
+
+		# units
 
 		if (self.units_length):
 			self.file.write('Attribute ("string units:length", "%s")\n' %
@@ -1651,11 +1812,28 @@ class gelato_pyg(object):
 			self.file.write('Attribute ("float units:lengthscale", %s)\n' %
 				round(float(self.units_lengthscale), self.PRECISION))
 
+		# ray traced
+
 		if (self.enable_ray_traced):
 			self.write_ray_traced()
 
+		# cameras
+
+		self.write_camera(curcam)
+
+#		for obj in self.objects:
+#			self.write_camera(obj)
+
+		# shadows
+
+		if ((self.shadow_maps or self.shadow_woo) and
+			((self.on_beauty and self.enable_dynamic) or self.on_shadows)):
+				self.cameras_shadows()
+
 		if (self.on_shadows):
 			self.write_device(self.title, 'null', self.data_color, self.camera_name)
+
+		# ambient occlusion
 
 		if (self.on_beauty or self.on_bake_diffuse or self.on_ambient_occlusion):
 			if (self.enable_viewer):
@@ -1667,17 +1845,15 @@ class gelato_pyg(object):
 			elif (self.npasses > 1):
 				raise GelatoError, 'No output format'
 
+		# beauty
+
 		if (self.format and self.on_beauty):
 			self.write_device(str(self.output_color), self.format, self.data_color, self.camera_name)
 
 			if (self.data_z):
 				self.write_device(str(self.output_z), self.format, self.data_z, self.camera_name)
 
-		self.write_camera(curcam)
-
-		if ((self.shadow_maps or self.shadow_woo) and
-			((self.on_beauty and self.enable_dynamic) or self.on_shadows)):
-				self.cameras_shadows()
+		# script
 
 		if (self.enable_script_header):
 			self.write_script(self.script_header)
@@ -1694,15 +1870,25 @@ class gelato_pyg(object):
 	def sequence(self):
 		fileout = self.file_output_pass()
 
+		# open file pyg
+
 		try:
 			self.file = open(fileout, 'w')
 		except IOError:
 			raise GelatoError, 'Cannot write file "%s"' % fileout
+		except:
+			sys.excepthook(*sys.exc_info())
+
+		# write head of the file
 
 		self.write_head()
 
+		# ambient_occlusion
+
 		if (self.on_ambient_occlusion):
 			self.write_ambient_occlusion_pass1()
+
+		# beaty or bake diffuse
 
 		if (self.on_beauty or self.on_bake_diffuse):
 			if (self.enable_sky):
@@ -1717,6 +1903,8 @@ class gelato_pyg(object):
 			if (self.shadow_ray_traced):
 				self.write_shadow_ray_traced()
 
+		# only beauty
+
 		if (self.on_beauty):
 			if (self.enable_ambient_occlusion):
 				self.write_ambient_occlusion_pass2()
@@ -1724,13 +1912,21 @@ class gelato_pyg(object):
 			if (self.enable_indirect_light):
 				self.write_indirect_light()
 
+		# debug shader
+
 		if (self.enable_debug_shaders and gelato_gui.debug_shader is not None):
 			self.file.write('\n')
 			self.file.write(str(gelato_gui.debug_shader))
 
+		# write all geometries
+
 		self.geometries()
 
+		# write tail of the file
+
 		self.write_tail()
+
+		# close file pyg
 
 		self.file.close()
 
@@ -1762,10 +1958,123 @@ class gelato_pyg(object):
 			self.sequence()
 			self.on_beauty = False
 
+	def shutter_matrices(self, obj, dup = False):
+
+		# get current frame
+
+		curframe = Blender.Get('curframe')
+
+		try:
+			# shutter
+
+			self.eval_shutter_open  = float(eval(self.shutter_open))
+			self.eval_shutter_close = float(eval(self.shutter_close))
+
+			if (self.eval_shutter_close < self.eval_shutter_open):
+				raise GelatoError, 'Invalid shutter range'
+
+			# frame open
+
+			frame_open = math.floor(float(curframe) + self.eval_shutter_open)
+			Blender.Set('curframe', int(frame_open))
+
+			if (dup):
+				matrix_start = []
+				for dobj, mat in obj.DupObjects:
+					matrix_start.append(mat.copy())
+			else:
+				matrix_start = obj.matrix.copy()
+
+			# frame close
+
+			frame_close = math.ceil(float(curframe) + self.eval_shutter_close)
+			Blender.Set('curframe', int(frame_close))
+
+			if (dup):
+				matrix_end = []
+				for dobj, mat in obj.DupObjects:
+					matrix_end.append(mat.copy())
+			else:
+				matrix_end = obj.matrix.copy()
+
+			self.delta_frames = frame_close - frame_open
+
+			return [matrix_start, matrix_end]
+
+		finally:
+			# restore frame
+
+			Blender.Set('curframe', curframe)
+
+	def interpolation_motion_blur(self, matrix_start, matrix_end):
+
+		# parametrics
+
+		t_open  = clamp(self.eval_shutter_open  / self.delta_frames, 0.0, 1.0)
+		t_close = clamp(self.eval_shutter_close / self.delta_frames, 0.0, 1.0)
+
+		# quaternions translation
+
+		tran_start = matrix_start.translationPart()
+		tran_end   = matrix_end.translationPart()
+
+		qtran_start = Blender.Mathutils.Quaternion(0, tran_start[0], tran_start[1], tran_start[2])
+		qtran_end   = Blender.Mathutils.Quaternion(0, tran_end[0],   tran_end[1],   tran_end[2])
+
+		# quaternions rotations
+
+		qrot_start = matrix_start.toQuat()
+		qrot_end   = matrix_end.toQuat()
+
+		# scales
+
+		scale_start = matrix_start.scalePart()
+		scale_end   = matrix_end.scalePart()
+
+		# Spherical Linear Interpolation translations
+
+		qtran_open  = Blender.Mathutils.Slerp(qtran_start, qtran_end, t_open)
+		qtran_close = Blender.Mathutils.Slerp(qtran_start, qtran_end, t_close)
+
+		# Spherical Linear Interpolation rotations
+
+		qrot_open  = Blender.Mathutils.Slerp(qrot_start, qrot_end, t_open)
+		qrot_close = Blender.Mathutils.Slerp(qrot_start, qrot_end, t_close)
+
+		# Linear Interpolation scales
+
+		scale_open  = scale_start * (1.0 - t_open)  + scale_end * t_open
+		scale_close = scale_start * (1.0 - t_close) + scale_end * t_close
+
+		# quaternions to matrices
+
+		matrix_open = qrot_open.toMatrix().resize4x4() \
+			* Blender.Mathutils.Matrix(
+				[scale_open[0], 0.0,           0.0,           0.0],
+				[0.0,           scale_open[1], 0.0,           0.0],
+				[0.0,           0.0,           scale_open[2], 0.0],
+				[qtran_open[1], qtran_open[2], qtran_open[3], 1.0])
+
+		matrix_close = qrot_close.toMatrix().resize4x4() \
+			* Blender.Mathutils.Matrix(
+				[scale_close[0], 0.0,            0.0,            0.0],
+				[0.0,            scale_close[1], 0.0,            0.0],
+				[0.0,            0.0,            scale_close[2], 0.0],
+				[qtran_close[1], qtran_close[2], qtran_close[3], 1.0])
+
+		# matrix shutter open and close
+
+		return [matrix_open, matrix_close]
+
 	def write_command(self):
+
+		# shadows
+
 		if (self.pass_shadows):
 			self.file.write('Command ("system", "string[2] argv", ("%s", "%s"))\n' %
 				(GELATO, self.filename_shadows))
+
+		# ambient occlusion
 
 		if (self.pass_ambient_occlusion):
 			self.file.write('Command ("system", "string[2] argv", ("%s", "%s"))\n' %
@@ -1773,13 +2082,22 @@ class gelato_pyg(object):
 			self.file.write('Command ("system", "string[4] argv", ("%s", "-o", "%s", "%s"))\n' %
 				(MAKETX, self.output_ambient_occlusion_tx, self.output_ambient_occlusion))
 
+		# diffuse
+
 		if (self.pass_bake_diffuse):
 			self.file.write('Command ("system", "string[2] argv", ("%s", "%s"))\n' %
 				(GELATO, self.filename_bake_diffuse))
 
+		# beauty
+
 		if (self.pass_beauty):
+			if (self.npasses <= 1):
+				name = self.filename
+			else:
+				name = self.filename_beauty
+
 			self.file.write('Command ("system", "string[2] argv", ("%s", "%s"))\n' %
-				(GELATO, self.filename_beauty))
+				(GELATO, name))
 
 	def setup(self):
 		global permanents, gelato_gui
@@ -1823,6 +2141,11 @@ class gelato_pyg(object):
 		# units
 
 		self.units_length = gelato_gui.menu_units.convert(self.units_length)
+
+		# stereo cameras
+
+		self.stereo_projection = gelato_gui.menu_stereo_projection.convert(self.stereo_projection)
+		self.stereo_shade      = gelato_gui.menu_stereo_shade.convert(self.stereo_shade)
 
 	def export(self, scene):
 
@@ -1902,11 +2225,20 @@ class gelato_pyg(object):
 				if (sd is not None):
 					sd.verbose = self.verbose
 
-		self.viewlayer = set(Blender.Window.ViewLayer())
+		for lig in lights_assign:
+			for sd in lig.itervalues():
+				if (sd is not None):
+					sd.verbose = self.verbose
+
+		self.viewlayer = frozenset(Blender.Window.ViewLayer())
 
 		self.objects = scene.objects
 
-		self.world   = Blender.World.GetCurrent()
+		try:
+			self.world = Blender.Main.scenes.world
+		except:
+			self.world = Blender.World.GetCurrent()	# deprecated
+
 		self.context = self.scene.getRenderingContext()
 		self.sizex   = float(self.context.imageSizeX())
 		self.sizey   = float(self.context.imageSizeY())
@@ -1949,7 +2281,7 @@ class gelato_pyg(object):
 
 			# command file
 
-			if ((self.npasses > 1) or self.pass_ambient_occlusion):
+			if (self.nframes or (self.npasses > 1) or self.pass_ambient_occlusion):
 
 				self.frame = None
 
@@ -1994,14 +2326,12 @@ class cfggui(object):
 			if (title):
 				slist.append('%s %%t' % title)
 
-			i = 0
 			self.store = {}
 			self.food  = {}
-			for (name, data) in options:
+			for i, (name, data) in enumerate(options):
 				slist.append('|%s %%x%d' % (name, i))
 				self.store[i] = data
 				self.food[name] = i
-				i += 1
 
 			self.cookie = ''.join(slist)
 
@@ -2013,6 +2343,7 @@ class cfggui(object):
 
 	def __init__(self):
 		global WIN
+		global materials_assign, lights_assign
 
 		self.x0  = 10	# start cursor x
 		self.y0  = 10	# start cursor y
@@ -2043,11 +2374,13 @@ class cfggui(object):
 			self.panel('Ray traced',     '_panel_ray_traced', self.panel_ray_traced, 'Panel ray traced'),
 			self.panel('AO',             '_panel_ambient_occlusion', self.panel_ambient_occlusion, 'Panel ambient occlusion'),
 			self.panel('Indirect Light', '_panel_indirectlight', self.panel_indirect_light, 'Panel indirect light'),
-			self.panel('Depth of Field', '_panel_dof', self.panel_dof, 'Panel depth of field'),
-
-			self.panel('Pass',           '_panel_pass', self.panel_pass, 'Panel select pass'),
-			self.panel('SSS',            '_panel_sss', self.panel_sss, 'Panel subsurface scattering'),
 			self.panel('Scripts',        '_panel_scripts', self.panel_scripts, 'Panel scripts'),
+
+			self.panel('Pass',           '_panel_pass', self.panel_pass, 'Panel select passes'),
+			self.panel('SSS',            '_panel_sss', self.panel_sss, 'Panel subsurface scattering'),
+			self.panel('Depth of Field', '_panel_dof', self.panel_dof, 'Panel depth of field'),
+			self.panel('Motion Blur',    '_panel_motion_blur', self.panel_motion_blur, 'Panel Motion Blur'),
+			self.panel('Stereo',         '_panel_stereo', self.panel_stereo, 'Panel stereo rendering'),
 		]
 
 		# ambient occlusion shader
@@ -2080,7 +2413,7 @@ class cfggui(object):
 			sys.excepthook(*sys.exc_info())
 			print 'Error: shader "%s" not found. Environment light is disabled' % file_name
 
-		materials_assign[0]['environment_light'] = sd
+		lights_assign[0]['environment_light'] = sd
 
 		# indirect light shader
 
@@ -2095,7 +2428,7 @@ class cfggui(object):
 			sys.excepthook(*sys.exc_info())
 			print 'Error: shader "%s" not found. Indirect light is disabled' % file_name
 
-		materials_assign[0]['indirect_light'] = sd
+		lights_assign[0]['indirect_light'] = sd
 
 		# bake diffuse shader
 
@@ -2145,10 +2478,11 @@ class cfggui(object):
 				try:
 					sd = shader(fd)
 
-					# only surface shader
+					# only surface or generic shader
 
-					if (sd.type is sd.types.surface):
-						list_surface.append([name[:-4], sd])
+					if ((sd.type is sd.types.surface) or
+						(sd.type is sd.types.generic)):
+							list_surface.append([name[:-4], sd])
 				except:
 					sys.excepthook(*sys.exc_info())
 					print 'Error: shader "%s" not found.' % name
@@ -2242,7 +2576,7 @@ class cfggui(object):
 
 		# files extensions
 
-		self.menu_files_extensions = self.bake_menu('files extensions', [
+		self.menu_files_extensions = self.bake_menu('Files extensions', [
 			['file.NNN.ext', 0],
 			['file.ext.NNN', 1],
 		])
@@ -2258,6 +2592,20 @@ class cfggui(object):
 			['Inch',       'in'],
 			['Foot',       'ft'],
 			['Mile',       'mi'],
+		])
+
+		# stereo cameras
+
+		self.menu_stereo_projection = self.bake_menu('Projection', [
+			['Off-axis', 'off-axis'],
+			['Parallel', 'parallel'],
+			['Toe-in',   'toe-in'],
+		])
+
+		self.menu_stereo_shade = self.bake_menu('Shade', [
+			['Left',   'left'],
+			['Center', 'center'],
+			['Right',  'right'],
 		])
 
 		self.home()
@@ -2291,9 +2639,10 @@ class cfggui(object):
 		self.id_buttons[id] = func
 		return id
 
-	def draw_rect(self, x, y, w, h):
+	def draw_rect(self, x, y, w, h, gap = True):
 		Blender.BGL.glRecti(self.x + x, self.y + y, self.x + x + w, self.y + y + h)
-		self.inc_x(w + self.m)
+		if (gap):
+			self.inc_x(w + self.m)
 
 	def draw_text(self, s, size, x = 0, y = 0):
 		Blender.BGL.glRasterPos2i(self.x + x, self.y + y)
@@ -2387,7 +2736,7 @@ class cfggui(object):
 				Blender.Draw.Exit()
 
 	def handle_button_event(self, evt):
-		global materials_assign
+		global materials_assign, lights_assign
 
 		if (self.id_buttons.has_key(evt)):
 			func = self.id_buttons[evt]
@@ -2406,15 +2755,21 @@ class cfggui(object):
 		if (not permanents['enable_bake_diffuse'].val):
 			permanents['pass_bake_diffuse'].val = 0
 
-		if (not (permanents['pass_beauty'].val or permanents['pass_shadows'].val or
-			permanents['pass_ambient_occlusion'].val or permanents['pass_bake_diffuse'].val)):
+		if (not (permanents['pass_beauty'].val or
+			permanents['pass_shadows'].val or
+			permanents['pass_ambient_occlusion'].val or
+			permanents['pass_bake_diffuse'].val)):
 				permanents['pass_beauty'].val = 1
 
-		if (permanents['data'].val < self.val_data_z):
-			if (permanents['filter'].val >= self.val_filter_min):
+		if ((permanents['data'].val < self.val_data_z) and
+			(permanents['filter'].val >= self.val_filter_min)):
 				permanents['filter'].val = 0 # Gaussian
 
 		for sd in materials_assign[0].itervalues():
+			if (sd is not None):
+				sd.update(evt)
+
+		for sd in lights_assign[0].itervalues():
 			if (sd is not None):
 				sd.update(evt)
 
@@ -2437,18 +2792,28 @@ class cfggui(object):
 
 	def cb_save(self, id):
 		try:
+			# export scene
+
 			pyg.export(Blender.Scene.GetCurrent())
+
 		except GelatoError, strerror:
+			sys.excepthook(*sys.exc_info())
 			Blender.Draw.PupMenu('Error%t|"' + str(strerror) + '"')
 
 	def cb_render(self, id):
 		global GELATO, permanents
 
 		try:
+			# export scene
+
 			pyg.export(Blender.Scene.GetCurrent())
+
+			# run gelato
+
 			if (os.path.isfile(permanents['filename'].val)):
 				os.system(self.cmd_mask % (GELATO, permanents['filename'].val))
 		except GelatoError, strerror:
+			sys.excepthook(*sys.exc_info())
 			Blender.Draw.PupMenu('Error%t|"' + str(strerror) + '"')
 
 	def cb_menu_text(self, id):
@@ -2502,6 +2867,7 @@ class cfggui(object):
 				sys.excepthook(*sys.exc_info())
 
 	def cb_debug_shader(self, id):
+		global permanents
 		sd = self.menu_debug_shader.convert(permanents['_select_debug_shader'].val)
 		if (sd is not None):
 			if ((self.debug_shader is not None) and (self.debug_shader is sd)):
@@ -2509,19 +2875,23 @@ class cfggui(object):
 			self.debug_shader = sd
 
 	def cb_ambient_occlusion_default(self, id):
+		global materials_assign
 		shader_ambient_occlusion = materials_assign[0]['ambient_occlusion']
 		shader_ambient_occlusion.default()
 		self.ambient_occlusion_setup(shader_ambient_occlusion)
 
 	def cb_shader_envlight_default(self, id):
-		shader_environment_light = materials_assign[0]['environment_light']
+		global lights_assign
+		shader_environment_light = lights_assign[0]['environment_light']
 		shader_environment_light.default()
 		self.occlusionmap_setup(shader_environment_light)
 
 	def cb_shader_indirect_light_default(self, id):
-		materials_assign[0]['indirect_light'].default()
+		global lights_assign
+		lights_assign[0]['indirect_light'].default()
 
 	def cb_shader_bake_diffuse_default(self, id):
+		global materials_assign
 		materials_assign[0]['bake_diffuse'].default()
 
 	def cb_catmull_clark(self, id):
@@ -2590,16 +2960,16 @@ class cfggui(object):
 			permanents[self.panels[0].reg_name].val = 1
 			func = self.panels[0].func
 
-		i = 0
-		for pan in self.panels:
+		for i, pan in enumerate(self.panels):
 			pan.id = self.draw_toggle(pan.name, 100, pan.reg_name, self.cb_panel, pan.help)
 
-			i += 1
-			if ((i % 6) == 0):
+			if ((i % 6) == 5):
 				self.line_feed()
 
 		self.line_feed()
 
+		Blender.BGL.glColor3f(0.2, 0.2, 0.2)
+		self.draw_rect(2, 2, 650, 11, False)
 		Blender.BGL.glColor3f(.2392, .3098, 1.0)
 		self.draw_rect(0, 4, 650, 10)
 		Blender.BGL.glColor3f(1.0, 1.0, 1.0)
@@ -2950,7 +3320,7 @@ class cfggui(object):
 			self.draw_string('Focal length: ', 160, 20, 'focallength',
 				help = 'Lens focal length')
 
-			self.draw_number('Quality: ', 100, 1, 128, 'dofquality',
+			self.draw_number('Quality: ', 100, 1, 256, 'dofquality',
 				help = 'Number of lens values for DoF')
 
 	def panel_environment(self):
@@ -2985,7 +3355,7 @@ class cfggui(object):
 
 				self.y = y
 
-			shader_environment_light = materials_assign[0]['environment_light']
+			shader_environment_light = lights_assign[0]['environment_light']
 			if (shader_environment_light):
 				self.line_feed()
 
@@ -2999,11 +3369,13 @@ class cfggui(object):
 				self.y = y
 
 	def panel_indirect_light(self):
+		global permanents, lights_assign
+
 		self.draw_toggle('Enable', 100, 'enable_indirect_light',
 			help = 'Enable indirect light')
 
 		if (permanents['enable_indirect_light'].val):
-			shader_indirect_light = materials_assign[0]['indirect_light']
+			shader_indirect_light = lights_assign[0]['indirect_light']
 			if (shader_indirect_light is not None):
 
 				self.draw_number('Min samples: ', 140, 0, 16, 'indirect_minsamples',
@@ -3074,6 +3446,38 @@ class cfggui(object):
 
 					self.draw_menu(self.menu_text, l, '_select_script_header',
 						self.cb_menu_text, 'Select script header')
+
+	def panel_stereo(self):
+		self.draw_toggle('Enable', 100, 'enable_stereo',
+			help = 'Enable stereo rendering')
+
+		if (permanents['enable_stereo'].val):
+			self.draw_menu(self.menu_stereo_projection, 100, 'stereo_projection',
+				help = 'Projection for stereo cameras')
+
+			self.draw_menu(self.menu_stereo_shade, 100, 'stereo_shade',
+				help = 'Which view to shade for stereo cameras')
+
+			self.draw_string('Separation: ', 155, 20, 'stereo_separation',
+				help = 'Camera separation for stereo cameras')
+
+			self.draw_string('Convergence: ', 155, 20, 'stereo_convergence',
+				help = 'Convergence distance for stereo cameras')
+
+	def panel_motion_blur(self):
+		self.draw_toggle('Enable', 100, 'enable_motion_blur',
+			help = 'Enable motion blur')
+
+		if (permanents['enable_motion_blur'].val):
+			self.draw_string('Shutter open: ', 160, 20, 'shutter_open',
+				help = 'Shutter open time for motion blur')
+
+			self.draw_string('Shutter close: ', 160, 20, 'shutter_close',
+				help = 'Shutter close time for motion blur')
+
+			self.draw_number('Quality: ', 100, 1, 256, 'temporalquality',
+				help = 'Number of time values for motion blur')
+
 # property
 
 def set_property_bool(name):
@@ -3090,7 +3494,13 @@ def set_property_bool(name):
 
 			obj.addProperty(name, 1, 'BOOL')
 			Blender.Redraw()
-			Blender.RedrawAll()
+
+			try:
+				Blender.Window.RedrawAll()
+			except:
+				Blender.RedrawAll()          # deprecated
+
+
 		except:
 			sys.excepthook(*sys.exc_info())
 
@@ -3225,6 +3635,17 @@ def default_value():
 		'pass_ambient_occlusion':     Blender.Draw.Create(0),
 		'pass_bake_diffuse':          Blender.Draw.Create(0),
 
+		'enable_stereo':              Blender.Draw.Create(0),
+		'stereo_separation':          Blender.Draw.Create('0'),
+		'stereo_convergence':         Blender.Draw.Create('0'),
+		'stereo_projection':          Blender.Draw.Create(0),		# off-axis
+		'stereo_shade':               Blender.Draw.Create(1),		# center
+
+		'enable_motion_blur':         Blender.Draw.Create(0),
+		'temporalquality':            Blender.Draw.Create(16),
+		'shutter_open':               Blender.Draw.Create('0.0'),
+		'shutter_close':              Blender.Draw.Create('0.5'),
+
 		'_panel_output':              Blender.Draw.Create(1),
 		'_panel_images':              Blender.Draw.Create(0),
 		'_panel_pass':                Blender.Draw.Create(0),
@@ -3240,10 +3661,17 @@ def default_value():
 		'_panel_ray_traced':          Blender.Draw.Create(0),
 		'_panel_sss':                 Blender.Draw.Create(0),
 		'_panel_scripts':             Blender.Draw.Create(0),
+		'_panel_stereo':              Blender.Draw.Create(0),
+		'_panel_motion_blur':         Blender.Draw.Create(0),
 	}
 
 	for mat in materials_assign[1:]:
 		for sd in mat.itervalues():
+			if (sd is not None):
+				sd.default()
+
+	for lig in lights_assign[1:]:
+		for sd in lig.itervalues():
 			if (sd is not None):
 				sd.default()
 
@@ -3259,7 +3687,8 @@ def output_filename_xml():
 
 def xml_save():
 	global ROOT_ELEMENT, USE_XML_DOM_EXT
-	global permanents, materials_assign
+	global materials_assign, lights_assign
+	global permanents
 
 	# write xml file
 
@@ -3273,7 +3702,10 @@ def xml_save():
 
 	root.setAttribute('version', __version__)
 	root.setAttribute('timestamp', datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'))
-	root.setAttribute('user', getpass.getuser())
+
+	if (USE_GETPASS):
+		root.setAttribute('user', getpass.getuser())
+
 	root.setAttribute('platform', sys.platform)
 
 	head = doc.createElement('config')
@@ -3288,22 +3720,21 @@ def xml_save():
 		head.appendChild(elem)
 		elem.appendChild(doc.createTextNode(str(permanents[name].val).strip()))
 
-	# materials list
+	# materials
 
 	blender_materials = [m.name for m in Blender.Material.Get()]
 
-	idx = 0
-	for ml in materials_assign:
+	for idx, ml in enumerate(materials_assign):
 		materials = doc.createElement('materials')
 		root.appendChild(materials)
 		materials.setAttribute('index', str(idx))
 
-		for mat in sorted(materials_assign[idx].iterkeys()):
+		for mat in sorted(ml.iterkeys()):
 
 			if ((idx > 0) and (mat not in blender_materials)):
 				continue
 
-			sd = materials_assign[idx][mat]
+			sd = ml[mat]
 			if (sd is None):
 				continue
 
@@ -3311,34 +3742,56 @@ def xml_save():
 			materials.appendChild(material)
 			material.setAttribute('name', mat)
 
-			if (idx > 0):
+			if ((idx > 0) and (sd.widget_enable_sss.val)):
 				material.setAttribute('enable_sss', str(sd.widget_enable_sss.val))
 				material.setAttribute('sss_parameter', sd.widget_sss.val)
 
 			sd.toxml(doc, material)
 
-		idx += 1
+	# lights
+
+	for idx, lg in enumerate(lights_assign):
+		lights = doc.createElement('lights')
+		root.appendChild(lights)
+		lights.setAttribute('index', str(idx))
+
+		for lig in sorted(lg.iterkeys()):
+
+			sd = lg[lig]
+			if (sd is None):
+				continue
+
+			light = doc.createElement('light')
+			lights.appendChild(light)
+			light.setAttribute('name', lig)
+
+			sd.toxml(doc, light)
 
 	# write XML file
 
 	filename_xml = output_filename_xml()
 
 	try:
-		fxml = open(filename_xml, 'w')
+		fxml = open_temp_rename(filename_xml, 'w')
 
 	except IOError:
 
 		print 'Error: Cannot write file "%s"' % filename_xml
 		return
 
+	except:
+		sys.excepthook(*sys.exc_info())
+		return
+
 	if (USE_XML_DOM_EXT):
-		xml.dom.ext.PrettyPrint(doc, fxml)
+		xml.dom.ext.PrettyPrint(doc, fxml.fd)
 	else:
-		doc.writexml(fxml, addindent = '  ', newl = '\n')
+		doc.writexml(fxml.fd, addindent = '  ', newl = '\n')
 
 def xml_load():
 	global ROOT_ELEMENT
-	global permanents, materials_assign
+	global materials_assign, lights_assign
+	global permanents
 
 	# read xml file
 
@@ -3383,10 +3836,9 @@ def xml_load():
 				else:
 					print 'Error: file "%s", element "%s" type "%s" unknow' % (filename_xml, name, ty)
 			except:
-				if (self.verbose > 0):
-					sys.excepthook(*sys.exc_info())
+				sys.excepthook(*sys.exc_info())
 
-	# materials list
+	# materials
 
 	blender_materials = [m.name for m in Blender.Material.Get()]
 
@@ -3417,18 +3869,39 @@ def xml_load():
 				if (enable_sss):
 					sd.widget_enable_sss = Blender.Draw.Create(int(enable_sss))
 			except:
-				if (self.verbose > 0):
-					sys.excepthook(*sys.exc_info())
+				sys.excepthook(*sys.exc_info())
 
 			try:
 				sss_parameter = mat.getAttribute('sss_parameter')
 				if (sss_parameter):
 					sd.widget_sss = Blender.Draw.Create(sss_parameter.strip())
 			except:
-				if (self.verbose > 0):
-					sys.excepthook(*sys.exc_info())
+				sys.excepthook(*sys.exc_info())
 
 			materials_assign[idx][name] = sd
+
+	# lights
+
+	for light in doc.getElementsByTagName('lights'):
+		index = light.getAttribute('index')
+		if (index is None):
+			print 'Error: file "%s", not attribute "index" element "lights"' % filename_xml
+			continue
+
+		idx = int(index)
+
+		for lig in light.getElementsByTagName('light'):
+
+			name = lig.getAttribute('name')
+			if (name is None):
+				continue
+
+			sd = shader()
+
+			if (not sd.fromxml(lig)):
+				continue
+
+			lights_assign[idx][name] = sd
 
 # utility
 
@@ -3444,10 +3917,19 @@ def get_gui_id(global_id):
 	gui_id_memo[global_id] = uniq_gui_id
 	return uniq_gui_id
 
+def clamp(v, vmin, vmax):
+	if (v < vmin):
+		return vmin
+	if (v > vmax):
+		return vmax
+	return v
+
 def escape_quote(name):
+	# replace '"' to '\"'
 	return name.replace('"', '\\"')
 
 def space2underscore(name):
+	# replace spaces to '_'
 	return re.sub('\s+', '_', name)
 
 def fix_file_name(name):
@@ -3492,7 +3974,8 @@ def find_files(pattern, paths):
 def main():
 	global ROOT_ELEMENT, FILENAME_PYG
 	global GELATO, GSOINFO, MAKETX, WIN
-	global permanents, materials_assign, gelato_gui, pyg
+	global materials_assign, lights_assign
+	global permanents, gelato_gui, pyg
 
 	PYTHON_MAJOR = 2
 	PYTHON_MINOR = 4
@@ -3541,9 +4024,10 @@ def main():
 
 	gelato_gui = None
 
-	# material's set
+	# materials and lights
 
 	materials_assign = [{}, {}]
+	lights_assign    = [{}, {}]
 
 	# default value
 
