@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18a'
+__version__ = '0.18b'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -856,7 +856,9 @@ class gelato_pyg(object):
 		return filename
 
 	def construct_path(self, filename):
-		nfile = Blender.sys.cleanpath(filename)
+		(directory, name) = os.path.split(filename)
+		npath = Blender.sys.cleanpath(directory)
+		nfile = os.path.join(npath, name)
 
 		if (self.enable_relative_paths):
 			if (nfile.startswith('//')):
@@ -1755,8 +1757,9 @@ class gelato_pyg(object):
 			for ftex in textures_color:
 				if (self.verbose > 0):
 					self.file.write('## Texture color: "%s"\n' % ftex.name)
-				self.file.write('Shader ("surface", "pretexture", "string texturename", "%s", "string wrap", "%s")\n' %
-					(fix_file_name(ftex.file), self.convert_extend[ftex.extend]))
+				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
+				self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
+				self.file.write('Shader ("surface", "pretexture")\n')
 
 		# shader surface (FIXME)
 
@@ -1790,11 +1793,23 @@ class gelato_pyg(object):
 		# texture displacement
 
 		if (self.enable_displacements):
+
+			esg = len(textures_displacement) > 1
+
+			if (esg):
+				self.file.write('ShaderGroupBegin ()\n')
+
 			for ftex in textures_displacement:
 				if (self.verbose > 0):
 					self.file.write('## Texture displacement: "%s"\n' % ftex.name)
-				self.file.write('Shader ("displacement", "dispmap", "string texturename", "%s", "float Km", %s, "string wrap", "%s")\n' %
-					(fix_file_name(ftex.file), round(ftex.disp, self.PRECISION), self.convert_extend[ftex.extend]))
+
+				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
+				self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
+				self.file.write('Parameter ("float Km", %s)\n' %  round(ftex.disp, self.PRECISION))
+				self.file.write('Shader ("displacement", "dispmap")\n')
+
+			if (esg):
+				self.file.write('ShaderGroupEnd ()\n')
 
 		# photon map
 
@@ -2001,6 +2016,8 @@ class gelato_pyg(object):
 						'"float weightarea", 1, '
 						'"float interpolate", 1)\n' %
 							file_name)
+
+		# proxy
 
 		if (enable_proxy and proxy_file):
 
