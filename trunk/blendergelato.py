@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18b'
+__version__ = '0.18c'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -165,7 +165,6 @@ class progress_bar(object):
 
 		if (INTERACTIVE):
 			Blender.Window.DrawProgressBar(0.0, '')
-
 
 	def update(self, value = 0):
 		amount  = clamp(value, self.count_min, self.count_max)
@@ -442,7 +441,7 @@ class shader(base):
 
 	def update(self, id):
 		for val in self.parameters.itervalues():
-			if (val.id_gui == id):
+			if (val and (val.id_gui == id)):
 				val.change = True
 				return
 
@@ -742,6 +741,17 @@ class gelato_pyg(object):
 			self.texco   = texco
 			self.disp    = disp
 
+	class data_mesh(object):
+		__slots__ = ['db_geometry', 'nverts', 'verts', 'points', 'normals', 'vertexcolor']
+
+		def __init__(self):
+			self.db_geometry = {}
+			self.nverts      = []
+			self.verts       = []
+			self.points      = []
+			self.normals     = []
+			self.vertexcolor = []
+
 	def __init__(self):
 		"""
 		Gelato class export.
@@ -760,8 +770,7 @@ class gelato_pyg(object):
 		self.EXT_DIFFUSE   = '.sdb'
 		self.EXT_PHOTONMAP = '.sdb'
 
-		self.passes = enum_type('beauty', 'shadows', 'ambient_occlusion',\
-			'photon_map', 'bake_diffuse')
+		self.passes = enum_type('beauty', 'shadows', 'ambient_occlusion', 'photon_map', 'bake_diffuse')
 
 		self.pbar = progress_bar(78)
 
@@ -784,30 +793,55 @@ class gelato_pyg(object):
 		])
 
 	def generate_instance_name(self, name, ext = '', prefix = '', postfix = '', directory = True, noframe = False):
-		d = (self.directory if (directory) else '')
 
-		if (self.instance is None):
-			if (noframe or self.frame is None):
-				return os.path.join(d, '%s%s%s%s' % (prefix, name, postfix, ext))
-			else:
-				return os.path.join(d, '%s%s%s%s%s' % (prefix, name, postfix, self.pyg.mask % self.frame, ext))
-		else:
-			if (noframe or self.frame is None):
-				return os.path.join(d, '%s%s%s-%s%s' % (prefix, name, postfix, self.instance, ext))
-			else:
-				return os.path.join(d, '%s%s%s-%s%s%s' % (prefix, name, postfix, self.instance, self.pyg.mask % self.frame, ext))
+		slist = []
 
-	def generate_split_name(self, name, prefix, i, n):
-		if (self.frame is None):
-			if (n <= 1):
-				return '%s_%s_%s%s' % (self.base, prefix, name, self.ext)
-			else:
-				return '%s_%s_%s-%s%s' % (self.base, prefix, name, i, self.ext)
-		else:
-			if (n <= 1):
-				return '%s_%s_%s%s%s' % (self.base, prefix, name, self.mask % self.frame, self.ext)
-			else:
-				return '%s_%s_%s-%s%s%s' % (self.base, prefix, name, i, self.mask % self.frame, self.ext)
+		if (directory and self.directory and not self.enable_relative_paths):
+			slist.append(self.directory)
+			slist.append(os.path.sep)
+
+		slist.append(prefix)
+		slist.append(name)
+		slist.append(postfix)
+
+		if (self.instance is not None):
+			slist.append('-')
+			slist.append(str(self.instance))
+
+		if (not (noframe or self.frame is None)):
+			slist.append(str(self.mask % self.frame))
+
+		slist.append(ext)
+
+		return ''.join(slist)
+
+	def generate_split_name(self, name, prefix, i, n, im, nm):
+
+		slist = [self.base]
+
+		if (self.npasses > 1):
+			slist.append('_')
+			slist.append(self.pass_name_file)
+
+		slist.append('_')
+		slist.append(prefix)
+		slist.append('_')
+		slist.append(name)
+
+		if (n > 1):
+			slist.append('-M')
+			slist.append(str(i))
+
+		if (nm > 1):
+			slist.append('-B')
+			slist.append(str(im))
+
+		if (self.frame is not None):
+			slist.append(str(self.mask % self.frame))
+
+		slist.append(self.ext)
+
+		return ''.join(slist)
 
 	def object_name(self, name):
 		if (self.instance is None):
@@ -826,8 +860,8 @@ class gelato_pyg(object):
 	def file_diffuse_name(self, name):
 		return self.generate_instance_name(space2underscore(name), self.EXT_DIFFUSE, self.base + '_diffuse_')
 
-	def file_object_name(self, name, i, n):
-		return self.generate_split_name(space2underscore(name), 'object', i, n)
+	def file_object_name(self, name, material_index, material_max, mbur_index, mbux_max):
+		return self.generate_split_name(space2underscore(name), 'object', material_index, material_max, mbur_index, mbux_max)
 
 	def file_output_pass(self):
 		if (self.npasses <= 1):
@@ -997,6 +1031,12 @@ class gelato_pyg(object):
 
 			self.file.write('Attribute ("int ray:opaqueshadows", %d)\n' %
 				self.ray_traced_opaque_shadows)
+
+			self.file.write('Attribute ("int ray:displace", %d)\n' %
+				self.ray_displace)
+
+			self.file.write('Attribute ("int ray:motion", %d)\n' %
+				self.ray_motion)
 
 		self.file.write('Attribute ("string geometryset", "+reflection")\n')
 		self.file.write('Attribute ("string geometryset", "+refraction")\n')
@@ -1352,9 +1392,9 @@ class gelato_pyg(object):
 
 		# motion blur
 
-		if (self.enable_motion_blur and (self.current_pass == self.passes.beauty)):
+		if (self.enable_motion_blur and (self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion])):
 			self.file.write('Attribute ("int temporalquality", %s)\n' %
-				self.temporalquality)
+				self.temporal_quality)
 
 			self.file.write('Attribute ("float[2] shutter", (%s, %s))\n' %
 				(self.shutter_open, self.shutter_close))
@@ -1452,6 +1492,14 @@ class gelato_pyg(object):
 			self.title,
 			cname))
 
+	def write_motion(self, n):
+		if (n < 2):
+			return
+
+		self.file.write('Motion ')
+		self.write_array(self.file, range(n), '', True)
+		self.file.write('\n')
+
 	def write_script(self, name):
 		if (name is None):
 			return
@@ -1475,14 +1523,14 @@ class gelato_pyg(object):
 
 		self.file.write('")\n')
 
-	def write_mesh(self, name, i, n, single_sided, interpolation, nverts,\
+	def write_mesh(self, name, material_index, material_max, mbur_index, mbux_max, single_sided, interpolation, nverts,\
 			verts, points, normals = [], vertexcolor = [], holes = [], s = [], t = []):
 
 		if (single_sided):
 			self.file.write('Attribute ("int twosided", 0)\n')
 
 		if (self.enable_split):
-			fobj_name = self.file_object_name(name, i, n)
+			fobj_name = self.file_object_name(name, material_index, material_max, mbur_index, mbux_max)
 
 			self.file.write('Input ("%s")\n' % fobj_name)
 
@@ -1498,7 +1546,7 @@ class gelato_pyg(object):
 		else:
 			wfile = self.file
 
-		if (self.verbose > 0):
+		if ((self.verbose > 0) and ((mbur_index < 1) or self.enable_split)):
 			wfile.write('## Points: %s\n' % (len(points) / 3))
 			wfile.write('## Faces:  %s\n' % len(nverts))
 
@@ -1628,25 +1676,10 @@ class gelato_pyg(object):
 		if (disable_indirect):
 			self.file.write('Attribute ("string geometryset", "-indirect")\n')
 
-		# transform
+		self.write_motion(len(matrices))
 
-		l = len(matrices)
-		if (l == 1):
-
-			self.write_set_transform(matrices[0])
-
-		elif (l == 2) :
-
-			# motion blur
-
-			self.file.write('Motion (%s, %s)\n' %
-				(self.shutter_open, self.shutter_close))
-
-			self.write_set_transform(matrices[0])
-			self.write_set_transform(matrices[1])
-		else:
-			raise GelatoError, sys._getframe(0).f_code.co_name + ' invalid number of items'
-			self.write_mesh(name, 0, 0, False, interpolation, nverts, verts, points, [])
+		for m in matrices:
+			self.write_set_transform(m)
 
 	def write_geometry_tail(self):
 		self.file.write('PopAttributes ()\n')
@@ -1729,66 +1762,68 @@ class gelato_pyg(object):
 
 		self.file.write('PushAttributes ()\n')
 
-		# color
+		if (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows]):
 
-		self.file.write('Attribute ("color C", (%s, %s, %s))\n' % (
-			round(material.R, self.PRECISION),
-			round(material.G, self.PRECISION),
-			round(material.B, self.PRECISION)))
+			# color
 
-		# alpha
+			self.file.write('Attribute ("color C", (%s, %s, %s))\n' % (
+				round(material.R, self.PRECISION),
+				round(material.G, self.PRECISION),
+				round(material.B, self.PRECISION)))
 
-		alpha = material.alpha
-		if (alpha < 1.0):
-			alpha = round(alpha, self.PRECISION)
-			self.file.write('Attribute ("color opacity", (%s, %s, %s))\n' %
-				(alpha, alpha, alpha))
+			# alpha
 
-		# shadergroup
+			alpha = material.alpha
+			if (alpha < 1.0):
+				alpha = round(alpha, self.PRECISION)
+				self.file.write('Attribute ("color opacity", (%s, %s, %s))\n' %
+					(alpha, alpha, alpha))
 
-		enable_shadergroup = not self.enable_debug_shaders and self.enable_textures and textures_color and (self.current_pass == self.passes.beauty)
+			# shadergroup
 
-		if (enable_shadergroup):
-			self.file.write('ShaderGroupBegin ()\n')
+			enable_shadergroup = not self.enable_debug_shaders and self.enable_textures and textures_color and (self.current_pass == self.passes.beauty)
 
-		# texture color
+			if (enable_shadergroup):
+				self.file.write('ShaderGroupBegin ()\n')
 
-		if ((not self.enable_debug_shaders) and self.enable_textures):
-			for ftex in textures_color:
-				if (self.verbose > 0):
-					self.file.write('## Texture color: "%s"\n' % ftex.name)
-				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
-				self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
-				self.file.write('Shader ("surface", "pretexture")\n')
+			# texture color
 
-		# shader surface (FIXME)
+			if ((not self.enable_debug_shaders) and self.enable_textures):
+				for ftex in textures_color:
+					if (self.verbose > 0):
+						self.file.write('## Texture color: "%s"\n' % ftex.name)
+					self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
+					self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
+					self.file.write('Shader ("surface", "pretexture")\n')
 
-		if ((not self.enable_debug_shaders) and (self.verbose > 0)):
-			self.file.write('## Material: "%s"\n' % mat_name)
+			# shader surface (FIXME)
 
-		if (self.enable_shaders and not (self.enable_debug_shaders or (self.current_pass == self.passes.photon_map))):
+			if ((not self.enable_debug_shaders) and (self.verbose > 0)):
+				self.file.write('## Material: "%s"\n' % mat_name)
 
-			if ((not (flags & Blender.Material.Modes.SHADELESS)) and not (bake_diffuse and (self.current_pass == self.passes.bake_diffuse))):
+			if (self.enable_shaders and not (self.enable_debug_shaders or (self.current_pass == self.passes.photon_map))):
 
-				if (materials_assign[1].has_key(mat_name)):
+				if ((not (flags & Blender.Material.Modes.SHADELESS)) and not (bake_diffuse and (self.current_pass == self.passes.bake_diffuse))):
 
-					sd = copy.deepcopy(materials_assign[1][mat_name])
-					if (sd is not None):
-						if (bake_diffuse and self.enable_bake_diffuse and (self.current_pass == self.passes.beauty) and sd.widget_enable_sss.val):
-							try:
-								file_name = self.file_diffuse_name(name)
-								sd[sd.widget_sss.val] = file_name
-							except:
-								if (self.verbose > 0):
-									sys.excepthook(*sys.exc_info())
+					if (materials_assign[1].has_key(mat_name)):
 
-						self.file.write(str(sd))
-				else:
-					# default plastic
-					self.file.write('Shader ("surface", "plastic")\n')
+						sd = copy.deepcopy(materials_assign[1][mat_name])
+						if (sd is not None):
+							if (bake_diffuse and self.enable_bake_diffuse and (self.current_pass == self.passes.beauty) and sd.widget_enable_sss.val):
+								try:
+									file_name = self.file_diffuse_name(name)
+									sd[sd.widget_sss.val] = file_name
+								except:
+									if (self.verbose > 0):
+										sys.excepthook(*sys.exc_info())
 
-		if (enable_shadergroup):
-			self.file.write('ShaderGroupEnd ()\n')
+							self.file.write(str(sd))
+					else:
+						# default plastic
+						self.file.write('Shader ("surface", "plastic")\n')
+
+			if (enable_shadergroup):
+				self.file.write('ShaderGroupEnd ()\n')
 
 		# texture displacement
 
@@ -1813,7 +1848,7 @@ class gelato_pyg(object):
 
 		# photon map
 
-		if (self.current_pass == self.passes.photon_map):
+		if ((self.current_pass == self.passes.photon_map) and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
 
 			raytransp = (flags & Blender.Material.Modes.RAYTRANSP) != 0
 			raymirror = (flags & Blender.Material.Modes.RAYMIRROR) != 0
@@ -1869,6 +1904,83 @@ class gelato_pyg(object):
 
 		self.file.write('PopAttributes ()\n')
 
+	def process_obj_transformation(self, obj, mblur, dup = False):
+
+		if (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and (mblur and property_boolean_get(obj, 'motionblur_transformation', True)))):
+
+			return [obj.matrix]
+
+		else:
+			# get current frame number
+
+			curframe = Blender.Get('curframe')
+
+			try:
+				matrixs = []
+
+				for i in xrange(self.frames_transformation - 1, -1, -1):
+
+					f = curframe - i
+					if (f < 1):
+						f = 1
+
+					Blender.Set('curframe', f)
+
+					if (dup):
+						dup_matrixs = []
+						for dobj, mat in obj.DupObjects:
+							dup_matrixs.append(mat.copy())
+
+						matrixs.append(dup_matrixs)
+					else:
+						matrixs.append(obj.matrix.copy())
+
+				return matrixs
+
+			finally:
+				# restore frame number
+
+				Blender.Set('curframe', curframe)
+
+	def process_mesh_deformation(self, obj):
+
+		# motion blur deformation
+
+		if  (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and  self.enable_motion_blur and property_boolean_get(obj, 'motionblur_deformation'))):
+
+			mesh = Blender.Mesh.New()
+			mesh.getFromObject(obj, 0, 1)
+
+			return [mesh]
+
+		else:
+			# get current frame number
+
+			curframe = Blender.Get('curframe')
+
+			try:
+				meshs = []
+
+				for i in xrange(self.frames_deformation - 1, -1, -1):
+
+					f = curframe - i
+					if (f < 1):
+						f = 1
+
+					Blender.Set('curframe', f)
+
+					mesh = Blender.Mesh.New()
+					mesh.getFromObject(obj, 0, 1)
+
+					meshs.append(mesh)
+
+				return meshs
+
+			finally:
+				# restore frame number
+
+				Blender.Set('curframe', curframe)
+
 	def generate_mesh(self, obj, matrices):
 		global materials_assign
 
@@ -1878,15 +1990,19 @@ class gelato_pyg(object):
 		name = obj.name
 
 		try:
-			mesh = Blender.Mesh.New()
-			mesh.getFromObject(obj, 0, 1)
+
+			meshs = self.process_mesh_deformation(obj)
 
 		except:
 			if (self.verbose > 0):
 				sys.excepthook(*sys.exc_info())
 			return
 
-		nfaces = len(mesh.faces)
+		nmeshs = len(meshs)
+		if (nmeshs == 0):
+			return
+
+		nfaces = len(meshs[0].faces)
 		if (nfaces == 0):
 			return
 
@@ -1907,7 +2023,7 @@ class gelato_pyg(object):
 
 		# single sided face
 
-		single_sided = not (self.all_double_sided or (mesh.mode & Blender.Mesh.Modes.TWOSIDED))
+		single_sided = not (self.all_double_sided or (meshs[0].mode & Blender.Mesh.Modes.TWOSIDED))
 
 		# if NURBS smooth surface
 
@@ -1915,85 +2031,90 @@ class gelato_pyg(object):
 
 		# UV map
 
-		faceuv = mesh.faceUV
+		faceuv = meshs[0].faceUV
 
 		# vertex color
 
-		vtcolor = mesh.vertexColors
+		vtcolor = meshs[0].vertexColors
 
-		# init geometry
+		# loop all meshs
 
-		db_geometry = {}
+		db_mesh = []
 
-		nverts      = []
-		verts       = []
-		points      = []
-		normals     = []
-		vertexcolor = []
+		for mesh in meshs:
 
-		# geometry faces
+			# init geometry
 
-		if (vtcolor):
-			nlist_col = range(len(mesh.verts))
-
-		for i, face in enumerate(mesh.faces):
-
-			if (face.smooth):
-				smooth = True
-
-			nv = len(face.verts)
-			nverts.append(nv)
-
-			geo = db_geometry.get(face.mat)
-			if (geo is None):
-				geo = self.data_geometry()
-				db_geometry[face.mat] = geo
-
-			geo.index.append(i)
-			geo.nverts.append(nv)
-
-			for v in face.verts:
-				idx = v.index
-				verts.append(idx)
-				geo.verts.append(idx)
-
-			if (faceuv):
-				for uv in face.uv:
-					geo.s.append(round(      uv[0], self.PRECISION))
-					geo.t.append(round(1.0 - uv[1], self.PRECISION))
+			dm = self.data_mesh()
+			db_mesh.append(dm)
 
 			if (vtcolor):
-				for j in xrange(len(face.verts)):
-					c = face.col[j]
-					nlist_col[face.verts[j].index] = [c.r, c.g, c.b]
+				nlist_col = range(len(mesh.verts))
 
-		# geometry points
+			# geometry faces
 
-		nlist_nor = []
-		for v in mesh.verts:
-			points.extend([v.co.x, v.co.y, v.co.z])
-			nlist_nor.append(v.no)
+			for i, face in enumerate(mesh.faces):
 
-		# geometry normals
-
-		if (smooth and (not catmull_clark)):
-			for face in mesh.faces:
 				if (face.smooth):
-					continue
+					smooth = True
+
+				nv = len(face.verts)
+				dm.nverts.append(nv)
+
+				geo = dm.db_geometry.get(face.mat)
+				if (geo is None):
+					geo = self.data_geometry()
+					dm.db_geometry[face.mat] = geo
+
+				geo.index.append(i)
+				geo.nverts.append(nv)
+
 				for v in face.verts:
-					nlist_nor[v.index] = face.no
+					idx = v.index
+					dm.verts.append(idx)
+					geo.verts.append(idx)
 
-			for nor in nlist_nor:
-				normals.extend([nor[0], nor[1], nor[2]])
+				if (faceuv):
+					for uv in face.uv:
+						geo.s.append(round(      uv[0], self.PRECISION))
+						geo.t.append(round(1.0 - uv[1], self.PRECISION))
 
-		# vertex color
+				if (vtcolor):
+					for j in xrange(len(face.verts)):
+						c = face.col[j]
+						nlist_col[face.verts[j].index] = [c.r, c.g, c.b]
+			# geometry points
 
-		if (vtcolor):
-			for c in nlist_col:
-				try:
-					vertexcolor.extend([c[0]/255.0, c[1]/255.0, c[2]/255.0])
-				except:
-					vertexcolor.extend([0.0, 0.0, 0.0])
+			nlist_nor = []
+			for v in mesh.verts:
+				dm.points.extend([v.co.x, v.co.y, v.co.z])
+				nlist_nor.append(v.no)
+
+			# geometry normals
+
+			if (smooth and (not catmull_clark)):
+				for face in mesh.faces:
+					if (face.smooth):
+						continue
+					for v in face.verts:
+						nlist_nor[v.index] = face.no
+
+				for nor in nlist_nor:
+					dm.normals.extend([nor[0], nor[1], nor[2]])
+
+			# vertex color
+
+			if (vtcolor):
+				for c in nlist_col:
+					try:
+						dm.vertexcolor.extend([c[0]/255.0, c[1]/255.0, c[2]/255.0])
+					except:
+						dm.vertexcolor.extend([0.0, 0.0, 0.0])
+
+		ndm = len(db_mesh)
+
+		if (ndm != nmeshs):
+			raise GelatoError, sys._getframe(0).f_code.co_name + ' invalid number of items'
 
 		self.write_geometry_head(name, matrices, disable_indirect)
 
@@ -2035,61 +2156,66 @@ class gelato_pyg(object):
 				self.write_material_tail(mat)
 
 		else:
-			if (mesh.materials and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
+			# materials
 
-				# materials
+			multiple_mat = len(mesh.materials) > 1
+			if (multiple_mat and catmull_clark):
+				set_mat = set(range(nfaces))
 
-				multiple_mat = len(mesh.materials) > 1
-				if (multiple_mat and catmull_clark):
-					set_mat = set(range(nfaces))
+			ngeo = len(db_mesh[0].db_geometry)
 
-				ngeo = len(db_geometry)
+			for mi, geo in db_mesh[0].db_geometry.iteritems():
 
-				for mi, geo in db_geometry.iteritems():
+				mat = None
 
-					mat = None
-
-					try:
-						if (obj.colbits & (1 << mi)):
-							# object's material
-							mat = obj.getMaterials()[mi]
-						else:
-							# mesh's material
-							mat = mesh.materials[mi]
-
-					except:
-						if (self.verbose > 0):
-							sys.excepthook(*sys.exc_info())
-
-					self.write_material_head(name, mat, bake_diffuse)
-
-					# vertex color
-
-					if (mat):
-						flags = mat.mode
-
-						if (not (flags & Blender.Material.Modes.VCOL_PAINT)):
-							vertexcolor = []
-
-					# multiple materials on a single mesh
-
-					if (multiple_mat and catmull_clark):
-						holes = list(set_mat - set(geo.index))
+				try:
+					if (obj.colbits & (1 << mi)):
+						# object's material
+						mat = obj.getMaterials()[mi]
 					else:
-						holes = []
+						# mesh's material
+						mat = mesh.materials[mi]
 
-					# geometry
+				except:
+					if (self.verbose > 0):
+						sys.excepthook(*sys.exc_info())
+
+				self.write_material_head(name, mat, bake_diffuse)
+
+				# vertex color
+
+				if (mat and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
+					flags = mat.mode
+
+					if (not (flags & Blender.Material.Modes.VCOL_PAINT)):
+						vertexcolor = []
+
+				# multiple materials on a single mesh
+
+				if (multiple_mat and catmull_clark):
+					holes = list(set_mat - set(geo.index))
+				else:
+					holes = []
+
+				# motion blur
+
+				if (self.current_pass != self.passes.shadows):
+					self.write_motion(ndm)
+
+				# geometry
+
+				for m, dm in enumerate(db_mesh):
+
+					geo = dm.db_geometry[mi]
 
 					if (catmull_clark):
-						self.write_mesh(name, mi, ngeo, single_sided, interpolation, nverts,
-							verts,     points, normals, vertexcolor, holes, geo.s, geo.t)
+						self.write_mesh(name, mi, ngeo, m, ndm, single_sided, interpolation, dm.nverts,
+							dm.verts, dm.points, dm.normals, dm.vertexcolor, holes, geo.s, geo.t)
 					else:
-						self.write_mesh(name, mi, ngeo, single_sided, interpolation, geo.nverts,
-							geo.verts, points, normals, vertexcolor, [],	geo.s, geo.t)
+						self.write_mesh(name, mi, ngeo, m, ndm, single_sided, interpolation, geo.nverts,
+							geo.verts, dm.points, dm.normals, dm.vertexcolor, [],   geo.s, geo.t)
 
-					self.write_material_tail(mat)
-			else:
-				self.write_mesh(name, 0, 0, single_sided, interpolation, nverts, verts, points, normals)
+				self.write_material_tail(mat)
 
 		self.write_geometry_tail()
 
@@ -2110,8 +2236,6 @@ class gelato_pyg(object):
 
 		self.instance = None
 
-		mb = mblur and (self.current_pass == self.passes.beauty)
-
 		if (self.dup_verts):
 			try:
 				# get duplicate object
@@ -2124,13 +2248,16 @@ class gelato_pyg(object):
 				self.instance = 0
 
 				# check is motion blur
-				if (mb):
-					(matrix_start, matrix_end) = self.shutter_matrices(obj, True)
+				if (mblur and (self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion])):
+					matrices = self.process_obj_transformation(obj, True, True)
 
-					for dobj, mat in dupobjs:
+					for dobj, m_dummy in dupobjs:
 
-						matrices = self.interpolation_motion_blur(matrix_start[self.instance], matrix_end[self.instance])
-						fc(dobj, matrices)
+						new_matrices = []
+						for m in matrices:
+							new_matrices.append(m[self.instance])
+
+						fc(dobj, new_matrices)
 						self.instance += 1
 				else:
 					for dobj, mat in dupobjs:
@@ -2146,13 +2273,7 @@ class gelato_pyg(object):
 				except:
 					pass
 
-		# check is motion blur
-		if (mb):
-			(matrix_start, matrix_end) = self.shutter_matrices(obj)
-
-			matrices = self.interpolation_motion_blur(matrix_start, matrix_end)
-		else:
-			matrices = [obj.matrix]
+		matrices = self.process_obj_transformation(obj, mblur)
 
 		fc(obj, matrices)
 
@@ -2378,6 +2499,15 @@ class gelato_pyg(object):
 		self.file.write('Attribute ("float units:fps", %s)\n' %
 			round(fps, self.PRECISION_FPS))
 
+		# motion blur
+
+		if (self.enable_motion_blur):
+			self.file.write('Attribute ("float units:timescale", 1.0)\n')
+			self.file.write('Attribute ("string units:time", "frames")\n')
+
+			self.file.write('Attribute ("float dice:motionfactor", %s)\n' %
+				self.dice_motionfactor)
+
 		# camera/s
 
 		if (self.current_pass != self.passes.photon_map):
@@ -2450,8 +2580,9 @@ class gelato_pyg(object):
 
 	def sequence(self, current_pass, pass_name):
 
-		self.current_pass = current_pass
-		self.pass_name    = pass_name
+		self.current_pass   = current_pass
+		self.pass_name      = pass_name
+		self.pass_name_file = space2underscore(self.pass_name.lower())
 
 		# open file pyg
 
@@ -2565,114 +2696,6 @@ class gelato_pyg(object):
 
 		if (self.pass_beauty):
 			self.sequence(self.passes.beauty, 'Beauty')
-
-	def shutter_matrices(self, obj, dup = False):
-
-		# get current frame
-
-		curframe = Blender.Get('curframe')
-
-		try:
-			# shutter
-
-			self.eval_shutter_open	= float(eval(self.shutter_open))
-			self.eval_shutter_close = float(eval(self.shutter_close))
-
-			if (self.eval_shutter_close < self.eval_shutter_open):
-				raise GelatoError, 'Invalid shutter range'
-
-			# frame open
-
-			frame_open = math.floor(float(curframe) + self.eval_shutter_open)
-			Blender.Set('curframe', int(frame_open))
-
-			if (dup):
-				matrix_start = []
-				for dobj, mat in obj.DupObjects:
-					matrix_start.append(mat.copy())
-			else:
-				matrix_start = obj.matrix.copy()
-
-			# frame close
-
-			frame_close = math.ceil(float(curframe) + self.eval_shutter_close)
-			Blender.Set('curframe', int(frame_close))
-
-			if (dup):
-				matrix_end = []
-				for dobj, mat in obj.DupObjects:
-					matrix_end.append(mat.copy())
-			else:
-				matrix_end = obj.matrix.copy()
-
-			self.delta_frames = frame_close - frame_open
-
-			return [matrix_start, matrix_end]
-
-		finally:
-			# restore frame
-
-			Blender.Set('curframe', curframe)
-
-	def interpolation_motion_blur(self, matrix_start, matrix_end):
-
-		# parametrics
-
-		t_open	= clamp(self.eval_shutter_open	/ self.delta_frames, 0.0, 1.0)
-		t_close = clamp(self.eval_shutter_close / self.delta_frames, 0.0, 1.0)
-
-		# quaternions translation
-
-		tran_start = matrix_start.translationPart()
-		tran_end   = matrix_end.translationPart()
-
-		qtran_start = Blender.Mathutils.Quaternion(0, tran_start[0], tran_start[1], tran_start[2])
-		qtran_end   = Blender.Mathutils.Quaternion(0, tran_end[0],   tran_end[1],   tran_end[2])
-
-		# quaternions rotations
-
-		qrot_start = matrix_start.toQuat()
-		qrot_end   = matrix_end.toQuat()
-
-		# scales
-
-		scale_start = matrix_start.scalePart()
-		scale_end   = matrix_end.scalePart()
-
-		# Spherical Linear Interpolation translations
-
-		qtran_open  = Blender.Mathutils.Slerp(qtran_start, qtran_end, t_open)
-		qtran_close = Blender.Mathutils.Slerp(qtran_start, qtran_end, t_close)
-
-		# Spherical Linear Interpolation rotations
-
-		qrot_open  = Blender.Mathutils.Slerp(qrot_start, qrot_end, t_open)
-		qrot_close = Blender.Mathutils.Slerp(qrot_start, qrot_end, t_close)
-
-		# Linear Interpolation scales
-
-		scale_open  = scale_start * (1.0 - t_open)  + scale_end * t_open
-		scale_close = scale_start * (1.0 - t_close) + scale_end * t_close
-
-		# quaternions to matrices
-
-		matrix_open = qrot_open.toMatrix().resize4x4() \
-			* Blender.Mathutils.Matrix(
-				[scale_open[0], 0.0,           0.0,           0.0],
-				[0.0,		scale_open[1], 0.0,           0.0],
-				[0.0,		0.0,           scale_open[2], 0.0],
-				[qtran_open[1], qtran_open[2], qtran_open[3], 1.0])
-
-		matrix_close = qrot_close.toMatrix().resize4x4() \
-			* Blender.Mathutils.Matrix(
-				[scale_close[0], 0.0,            0.0,            0.0],
-				[0.0,            scale_close[1], 0.0,            0.0],
-				[0.0,            0.0,            scale_close[2], 0.0],
-				[qtran_close[1], qtran_close[2], qtran_close[3], 1.0])
-
-		# matrix shutter open and close
-
-		return [matrix_open, matrix_close]
 
 	def write_command(self):
 
@@ -2954,8 +2977,8 @@ class cfggui(object):
 		self.spd     = 540	# space default button
 		self.xoffset = 0	# offset scroll x
 		self.yoffset = 0	# offset scroll y
-		self.xstep   = 20	# scroll sep
-		self.ystep   = 20	# scroll sep
+		self.xstep   = 20	# scroll sep x
+		self.ystep   = 20	# scroll sep y
 
 		self.color_bg   = Blender.BGL.Buffer(Blender.BGL.GL_FLOAT, 3, [0.5325, 0.6936, 0.0])
 		self.color_text = Blender.BGL.Buffer(Blender.BGL.GL_FLOAT, 3, [0.0, 0.0, 0.0])
@@ -2975,12 +2998,14 @@ class cfggui(object):
 		self.active_obj  = None
 		self.active_lamp = None
 
-		self.id_enable_obj_exclude          = None
-		self.id_enable_obj_catmull_clark    = None
-		self.id_enable_obj_bake_diffuse     = None
-		self.id_enable_obj_disable_indirect = None
-		self.id_enable_obj_enable_proxy     = None
-		self.id_enable_obj_proxy_file       = None
+		self.id_enable_obj_exclude           = None
+		self.id_enable_obj_catmull_clark     = None
+		self.id_enable_obj_bake_diffuse      = None
+		self.id_enable_obj_disable_indirect  = None
+		self.id_enable_obj_mb_transformation = None
+		self.id_enable_obj_mb_deformation    = None
+		self.id_enable_obj_enable_proxy      = None
+		self.id_enable_obj_proxy_file        = None
 
 		self.id_enable_lamp_exclude    = None
 		self.id_enable_lamp_photon_map = None
@@ -3163,12 +3188,14 @@ class cfggui(object):
 		# object properties
 
 		self.object_properties = [
-			('exclude',          '_enable_obj_exclude'),
-			('catmull_clark',    '_enable_obj_catmull_clark'),
-			('bake_diffuse',     '_enable_obj_bake_diffuse'),
-			('disable_indirect', '_enable_obj_disable_indirect'),
-			('enable_proxy',     '_enable_obj_enable_proxy'),
-			('proxy_file',       '_enable_obj_proxy_file'),
+			('exclude',                   '_enable_obj_exclude'),
+			('catmull_clark',             '_enable_obj_catmull_clark'),
+			('bake_diffuse',              '_enable_obj_bake_diffuse'),
+			('disable_indirect',          '_enable_obj_disable_indirect'),
+			('motionblur_transformation', '_enable_obj_mb_transformation'),
+			('motionblur_deformation',    '_enable_obj_mb_deformation'),
+			('enable_proxy',              '_enable_obj_enable_proxy'),
+			('proxy_file',                '_enable_obj_proxy_file'),
 		]
 
 		# lamp properties
@@ -3423,7 +3450,15 @@ class cfggui(object):
 			try:
 				persistents[name].val = property_get(self.active_obj, property)
 			except:
-				if (base.verbose > 1):
+				if (property == 'motionblur_transformation'):
+					try:
+						persistents[name].val = True
+						property_set(self.active_obj, property, True)
+					except:
+						if (base.verbose > 1):
+							sys.excepthook(*sys.exc_info())
+
+				elif (base.verbose > 1):
 					sys.excepthook(*sys.exc_info())
 
 	def active_obj_store(self):
@@ -3497,6 +3532,7 @@ class cfggui(object):
 		# active object
 
 		if (evt in [self.id_enable_obj_exclude, self.id_enable_obj_catmull_clark, self.id_enable_obj_bake_diffuse,\
+			self.id_enable_obj_mb_transformation, self.id_enable_obj_mb_deformation,\
 			self.id_enable_obj_disable_indirect, self.id_enable_obj_enable_proxy]):
 				self.active_obj_store()
 
@@ -4112,6 +4148,15 @@ class cfggui(object):
 				self.id_enable_obj_disable_indirect = self.draw_toggle('Disable indirect', 130, '_enable_obj_disable_indirect',
 					help = 'Disable indirect light')
 
+				if (persistents['enable_motion_blur'].val):
+					self.line_feed()
+
+					self.id_enable_obj_mb_transformation = self.draw_toggle('Motion blur transformation', 160, '_enable_obj_mb_transformation',
+						help = 'Enable motion blur transformation')
+
+					self.id_enable_obj_mb_deformation = self.draw_toggle('Motion blur deformation', 160, '_enable_obj_mb_deformation',
+						help = 'Enable motion blur deformation')
+
 				self.line_feed()
 
 				self.id_enable_obj_enable_proxy = self.draw_toggle('Enable proxy', 130, '_enable_obj_enable_proxy',
@@ -4485,16 +4530,23 @@ class cfggui(object):
 			help = 'Enable ray traced reflections and refractions')
 
 		if (persistents['enable_ray_traced'].val):
-
-			self.draw_toggle('Opaque shadows', 120, 'ray_traced_opaque_shadows',
-				help = 'Enable objects opaque regardless of their shaders')
-
 			if (persistents['shadow_ray_traced'].val):
 				self.draw_number('Shadow bias: ', 140, 0, 16, 'ray_traced_shadow_bias',
 					help = 'Ray traced shadow bias')
 
 			self.draw_number('Raytraced max depth: ', 170, 0, 32, 'ray_traced_max_depth',
 				help = 'Ray traced max depth')
+
+			self.line_feed()
+
+			self.draw_toggle('Opaque shadows', 100, 'ray_traced_opaque_shadows',
+				help = 'Enable objects opaque regardless of their shaders')
+
+			self.draw_toggle('Ray displace', 100, 'ray_displace',
+				help = 'Enable displace objects when ray tracing')
+
+			self.draw_toggle('Ray motion', 100, 'ray_motion',
+				help = 'Do rays consider motion-blur of objects')
 
 	def panel_sss(self):
 		global persistents
@@ -4565,14 +4617,27 @@ class cfggui(object):
 			help = 'Enable motion blur')
 
 		if (persistents['enable_motion_blur'].val):
-			self.draw_string('Shutter open: ', 160, 20, 'shutter_open',
+			self.draw_string('Shutter open: ', 180, 20, 'shutter_open',
 				help = 'Shutter open time for motion blur')
 
-			self.draw_string('Shutter close: ', 160, 20, 'shutter_close',
+			self.draw_string('Shutter close: ', 180, 20, 'shutter_close',
 				help = 'Shutter close time for motion blur')
 
-			self.draw_number('Quality: ', 100, 1, 256, 'temporalquality',
+			self.line_feed()
+
+			self.draw_number('Quality: ', 100, 1, 256, 'temporal_quality',
 				help = 'Number of time values for motion blur')
+
+			self.draw_number('Frames transformation: ', 180, 2, 9999, 'frames_transformation',
+				help = 'Number of frames moion blur transformation')
+
+			self.draw_number('Frames deformation: ', 180, 2, 9999, 'frames_deformation',
+				help = 'Number of frames moion blur deformation')
+
+			self.line_feed()
+
+			self.draw_number('Motion factor: ', 140, 0.0, 1000.0, 'dice_motionfactor',
+				help = 'Scaling for decreased tessellation and shading for moving objects')
 
 # property
 
@@ -4598,11 +4663,11 @@ def property_set(obj, name, value):
 def property_get(obj, name):
 	return obj.properties['gelato'][name]
 
-def property_boolean_get(obj, name):
+def property_boolean_get(obj, name, default = False):
 	try:
 		return property_get(obj, name) != 0
 	except:
-		return False
+		return default
 
 def selected_object(types = []):
 	selected = Blender.Object.GetSelected()
@@ -4690,6 +4755,8 @@ def default_values():
 		'ray_traced_max_depth':		Blender.Draw.Create(1),
 		'ray_traced_shadow_bias':	Blender.Draw.Create(0.01),
 		'ray_traced_opaque_shadows':	Blender.Draw.Create(1),
+		'ray_motion':			Blender.Draw.Create(0),
+		'ray_displace':			Blender.Draw.Create(1),
 
 		'lights_factor':		Blender.Draw.Create(50.0),
 		'enable_key_fill_rim':		Blender.Draw.Create(0),
@@ -4729,7 +4796,7 @@ def default_values():
 		'dofquality':			Blender.Draw.Create(16),
 
 		'enable_sky':			Blender.Draw.Create(1),
-		'units_length':			Blender.Draw.Create(0),
+		'units_length':			Blender.Draw.Create(0),		# none
 		'units_lengthscale':		Blender.Draw.Create('1.0'),
 
 		'limits_texturememory':		Blender.Draw.Create('20480'),
@@ -4754,14 +4821,19 @@ def default_values():
 		'stereo_shade':			Blender.Draw.Create(1),		# center
 
 		'enable_motion_blur':		Blender.Draw.Create(0),
-		'temporalquality':		Blender.Draw.Create(16),
 		'shutter_open':			Blender.Draw.Create('0.0'),
 		'shutter_close':		Blender.Draw.Create('0.5'),
+		'temporal_quality':		Blender.Draw.Create(16),
+		'frames_transformation':	Blender.Draw.Create(2),
+		'frames_deformation':		Blender.Draw.Create(2),
+		'dice_motionfactor':		Blender.Draw.Create(1.0),
 
 		'_enable_obj_exclude':		Blender.Draw.Create(0),
 		'_enable_obj_catmull_clark':	Blender.Draw.Create(0),
 		'_enable_obj_bake_diffuse':	Blender.Draw.Create(0),
 		'_enable_obj_disable_indirect':	Blender.Draw.Create(0),
+		'_enable_obj_mb_transformation':Blender.Draw.Create(0),
+		'_enable_obj_mb_deformation':	Blender.Draw.Create(0),
 		'_enable_obj_enable_proxy':	Blender.Draw.Create(0),
 		'_enable_obj_proxy_file':	Blender.Draw.Create(''),
 
@@ -4922,7 +4994,6 @@ def config_save():
 
 		try:
 			Blender.Text.unlink(Blender.Text.Get(name_xml))
-
 		except:
 			pass
 
@@ -4935,7 +5006,6 @@ def config_save():
 				xml.dom.ext.PrettyPrint(doc, text)
 			else:
 				text.write( doc.toprettyxml(indent = '  ', newl = '\n') )
-
 		except:
 			sys.excepthook(*sys.exc_info())
 
@@ -5302,7 +5372,7 @@ def main():
 		# export scene
 		gelato_gui.cb_save(0)
 
-		# export scene and run gelato
+		# export scene and run Gelato
 #		gelato_gui.cb_render(0)
 
 if __name__ == '__main__':
