@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18c'
+__version__ = '0.18d'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -41,8 +41,9 @@ Blender(TM) to NVIDIA Gelato(TM) scene converter
 # ***** END GPL LICENCE BLOCK *****
 
 import Blender
-import sys, os, math, copy
+import sys, os, subprocess
 import datetime, fnmatch
+import math, copy
 import re, tempfile, ctypes
 import getpass, socket
 import xml.dom.minidom
@@ -524,7 +525,7 @@ class shader(base):
 		cmd = self.cmd_mask % (GSOINFO, self.file)
 
 		try:
-			fd = os.popen(cmd, 'r')
+			fd = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE).stdout
 		except:
 			if (base.verbose > 0):
 				sys.excepthook(*sys.exc_info())
@@ -3641,8 +3642,11 @@ class cfggui(object):
 			filename = persistents['filename'].val
 
 			if (os.path.isfile(filename)):
-				(directory, cmd) = os.path.split(GELATO)
-				os.spawnl(os.P_NOWAIT, GELATO, cmd, filename)
+
+				pid = subprocess.Popen([GELATO, filename]).pid
+
+				print 'Info: run Gelato pid=%s' % pid
+
 			else:
 				raise GelatoError, 'No such file: `%s\'' % filename
 
