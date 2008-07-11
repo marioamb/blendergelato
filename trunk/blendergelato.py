@@ -1,5 +1,5 @@
 #!BPY
-# coding=utf-8
+#coding=utf-8
 
 """
 Name: 'Blender Gelato'
@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18d'
+__version__ = '0.18e'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -110,15 +110,20 @@ class open_temp_rename(object):
 
 		try:
 			self.fd.close()
-		except:
-			sys.excepthook(*sys.exc_info())
 
-		if (WINDOWS and os.path.exists(self.filename)):
+			filename_bak = self.filename + ('.bak' if WINDOWS else '~')
+
+			if (WINDOWS and os.path.exists(filename_bak)):
+				try:
+					os.unlink(filename_bak)
+				except:
+					pass
+
 			try:
-				os.unlink(self.filename)
+				os.rename(self.filename, filename_bak )
 			except:
 				pass
-		try:
+
 			if (not WINDOWS):
 				prevmask = os.umask(0)
 				os.umask(prevmask)
@@ -708,16 +713,19 @@ class gelato_pyg(object):
 			self.suffix = suffix
 
 		def __str__(self):
+			l = [self.pyg.base, self.name]
+
 			if (self.pyg.frame is None):
-				l = [self.pyg.base, self.name, self.ext]
+				l.extend([self.ext])
 			else:
-				nnn = self.pyg.mask % self.pyg.frame
+				n = self.pyg.mask % self.pyg.frame
+
 				if (self.suffix and self.pyg.files_extensions):
 					# file.ext.NNN
-					l = [self.pyg.base, self.name, self.ext, nnn]
+					l.extend([self.ext, n])
 				else:
 					# file.NNN.ext
-					l = [self.pyg.base, self.name, nnn, self.ext]
+					l.extend([n, self.ext])
 
 			return ''.join(l)
 
@@ -793,15 +801,10 @@ class gelato_pyg(object):
 #			(Blender.Texture.ExtendModes.CHECKER,  'periodic'),
 		])
 
-	def generate_instance_name(self, name, ext = '', prefix = '', postfix = '', directory = True, noframe = False):
+	def generate_instance_name(self, name, ext = '', prefix = '', postfix = '', noframe = False):
 
-		slist = []
+		slist = [prefix]
 
-		if (directory and self.directory and not self.enable_relative_paths):
-			slist.append(self.directory)
-			slist.append(os.path.sep)
-
-		slist.append(prefix)
 		slist.append(name)
 		slist.append(postfix)
 
@@ -847,13 +850,13 @@ class gelato_pyg(object):
 	def object_name(self, name):
 		if (self.instance is None):
 			return name
-		return self.generate_instance_name(name, prefix = '__', ext = '__', directory = False, noframe = True)
+		return self.generate_instance_name(name, prefix = '__', ext = '__', noframe = True)
 
 	def camera_shadow_name(self, name):
-		return self.generate_instance_name(name, prefix = '__shadow_', ext = '__', directory = False, noframe = True)
+		return self.generate_instance_name(name, prefix = '__shadow_', ext = '__', noframe = True)
 
 	def camera_photon_map_name(self, name):
-		return self.generate_instance_name(name, prefix = '__photon_map_', ext = '__', directory = False, noframe = True)
+		return self.generate_instance_name(name, prefix = '__photon_map_', ext = '__', noframe = True)
 
 	def file_shadow_name(self, name):
 		return self.generate_instance_name(space2underscore(name), self.EXT_SHADOWMAP, self.base + '_shadow_')
@@ -2413,12 +2416,19 @@ class gelato_pyg(object):
 				self.context.border[2],
 				1.0 - self.context.border[3],
 				1.0 - self.context.border[1]))
-#			self.file.write('Attribute ("int rerender", 1)\n')
-
 		# antialiasing
 
 		self.file.write('Attribute ("int[2] spatialquality", (%d, %d))\n' %
 			(self.antialiasing_x , self.antialiasing_y))
+
+		# rerender
+
+		if (self.enable_rerender):
+			self.file.write('Attribute ("int rerender", 1)\n')
+
+			if (self.rerender_memory):
+				self.file.write('Attribute ("int rerender:memory", %d)\n' %
+					int(self.rerender_memory))
 
 		# preview
 
@@ -3034,6 +3044,7 @@ class cfggui(object):
 			self.panel('Scripts',        '_panel_scripts', self.panel_scripts, 'Panel scripts'),
 
 			self.panel('Pass',           '_panel_pass', self.panel_pass, 'Panel select passes'),
+			self.panel('Rerender',       '_panel_rerender', self.panel_rerender, 'Panel select rerender'),
 		]
 
 		# ambient occlusion shader
@@ -3883,7 +3894,7 @@ class cfggui(object):
 		for i, pan in enumerate(self.panels):
 			pan.id = self.draw_toggle(pan.name, 100, pan.reg_name, self.cb_panel, pan.help)
 
-			if ((i != 18) and (i % 6) == 5):
+			if ((i != 19) and (i % 6) == 5):
 				self.line_feed()
 
 		self.line_feed()
@@ -4113,6 +4124,14 @@ class cfggui(object):
 			self.line_feed(False)
 			self.draw_toggle('Bake diffuse', 130, 'pass_bake_diffuse',
 				help = 'Enable bake diffuse pass')
+
+	def panel_rerender(self):
+		self.draw_toggle('Enable', 100, 'enable_rerender',
+			help = 'Enable the renderer in "re-render" mode')
+
+		if (persistents['enable_rerender'].val):
+			self.draw_string('Rerender memory: ', 210, 30, 'rerender_memory',
+				help = 'Size of re-render caches in KB')
 
 	def panel_geometries(self):
 		global persistents
@@ -4832,6 +4851,9 @@ def default_values():
 		'frames_deformation':		Blender.Draw.Create(2),
 		'dice_motionfactor':		Blender.Draw.Create(1.0),
 
+		'enable_rerender':		Blender.Draw.Create(0),
+		'rerender_memory':		Blender.Draw.Create(''),
+
 		'_enable_obj_exclude':		Blender.Draw.Create(0),
 		'_enable_obj_catmull_clark':	Blender.Draw.Create(0),
 		'_enable_obj_bake_diffuse':	Blender.Draw.Create(0),
@@ -4863,6 +4885,7 @@ def default_values():
 		'_panel_scripts':		Blender.Draw.Create(0),
 		'_panel_stereo':		Blender.Draw.Create(0),
 		'_panel_motion_blur':		Blender.Draw.Create(0),
+		'_panel_rerender':		Blender.Draw.Create(0),
 
 		'$pack_config':			Blender.Draw.Create(0),
 	}
@@ -4881,7 +4904,8 @@ def output_filename_xml():
 	global persistents
 
 	try:
-		(base, ext) = os.path.splitext(persistents['filename'].val)
+		(directory, file) = os.path.split(persistents['filename'].val)
+		(base, ext) = os.path.splitext(file)
 	except:
 		base = 'gelato'
 
