@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18e'
+__version__ = '0.18k'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -18,7 +18,7 @@ Blender(TM) to NVIDIA Gelato(TM) scene converter
 # NVIDIA Gelato(TM) Exporter
 #
 # Original By: Mario Ambrogetti
-# Date:        Thu, 29 May 2008 15:43:25 +0200
+# Date:        Sun, 20 Jul 2008 09:45:21 +0200
 #
 # ***** BEGIN GPL LICENSE BLOCK *****
 #
@@ -41,10 +41,10 @@ Blender(TM) to NVIDIA Gelato(TM) scene converter
 # ***** END GPL LICENCE BLOCK *****
 
 import Blender
-import sys, os, subprocess
+import sys, os, shutil, subprocess
 import datetime, fnmatch
-import math, copy
-import re, tempfile, ctypes
+import math, copy, re
+import tempfile, ctypes
 import getpass, socket
 import xml.dom.minidom
 
@@ -79,8 +79,7 @@ class enum_type(object):
 	def __getitem__(self, key):
 		if (type(key) is int):
 			return self.names[key]
-		else:
-			return getattr(self, key)
+		return getattr(self, key)
 
 	def __str__(self):
 		return str([(self.names[idx], idx) for idx in xrange(len(self.names))])
@@ -120,7 +119,7 @@ class open_temp_rename(object):
 					pass
 
 			try:
-				os.rename(self.filename, filename_bak )
+				os.rename(self.filename, filename_bak)
 			except:
 				pass
 
@@ -237,7 +236,8 @@ class base(object):
 class shader(base):
 	__slots__ = ['literals', 'types', 'file', 'nameid', 'size', \
 		'parameters', 'type', 'name', 'cmd_mask', \
-		'widget_enable_sss',  'id_enable_sss', 'widget_sss', 'id_sss', \
+		'widget_enable_sss',  'id_enable_sss', \
+		'widget_sss', 'id_sss', \
 		'widget_enable_shadow', 'id_enable_shadow', \
 		'widget_shadow', 'id_shadow']
 
@@ -343,7 +343,7 @@ class shader(base):
 		return len(self.parameters)
 
 	def __iter__(self):
-		return enumerate(self.parameters.keys())
+		return enumerate(self.parameters.iterkeys())
 
 	def __getitem__(self, key):
 		return self.parameters[key].widget_gui.val
@@ -729,37 +729,46 @@ class gelato_pyg(object):
 
 			return ''.join(l)
 
-	class data_geometry(object):
-		__slots__ = ['index', 'nverts', 'verts', 's', 't']
+	class data_st(object):
+		__slots__ = ['s', 't']
 
 		def __init__(self):
-			self.index  = []
-			self.nverts = []
-			self.verts  = []
-			self.s      = []
-			self.t      = []
+			self.s = []
+			self.t = []
+
+	class data_geometry(object):
+		__slots__ = ['smooth', 'index_faces', 'nverts', 'verts', 'normals', 'uvlayers']
+
+		def __init__(self):
+			self.smooth       = False
+			self.index_faces  = []
+			self.nverts       = []
+			self.verts        = []
+			self.normals      = []
+			self.uvlayers     = {}
 
 	class data_texture(object):
-		__slots__ = ['name', 'file', 'mapping', 'extend', 'texco', 'disp']
+		__slots__ = ['name', 'filename', 'uvlayer', 'mapping', 'extend', 'texco', 'disp']
 
-		def __init__(self, name, file, mapping, extend, texco, disp = 0):
-			self.name    = name
-			self.file    = file
-			self.mapping = mapping
-			self.extend  = extend
-			self.texco   = texco
-			self.disp    = disp
+		def __init__(self, name, filename, uvlayer, mapping, extend, texco, disp = 0):
+			self.name     = name
+			self.filename = filename
+			self.uvlayer  = uvlayer
+			self.mapping  = mapping
+			self.extend   = extend
+			self.texco    = texco
+			self.disp     = disp
 
 	class data_mesh(object):
-		__slots__ = ['db_geometry', 'nverts', 'verts', 'points', 'normals', 'vertexcolor']
+		__slots__ = ['db_geometry', 'points', 'nverts', 'verts', 'vertexcolors', 'uvname']
 
-		def __init__(self):
-			self.db_geometry = {}
-			self.nverts      = []
-			self.verts       = []
-			self.points      = []
-			self.normals     = []
-			self.vertexcolor = []
+		def __init__(self, uvname):
+			self.db_geometry  = {}
+			self.points       = []
+			self.nverts       = []
+			self.verts        = []
+			self.vertexcolors = []
+			self.uvname       = uvname
 
 	def __init__(self):
 		"""
@@ -894,16 +903,12 @@ class gelato_pyg(object):
 		return filename
 
 	def construct_path(self, filename):
-		(directory, name) = os.path.split(filename)
-		npath = Blender.sys.cleanpath(directory)
-		nfile = os.path.join(npath, name)
-
 		if (self.enable_relative_paths):
-			if (nfile.startswith('//')):
-				return nfile[2:]
-			return nfile
+			if (filename.startswith('//')):
+				return filename[2:]
+			return filename
 
-		return Blender.sys.expandpath(nfile)
+		return Blender.sys.expandpath(filename)
 
 	def write_matrix(self, matrix):
 		"""
@@ -940,6 +945,43 @@ class gelato_pyg(object):
 		trans  = matrix.translationPart()
 		self.file.write('Translate (%s, %s, %s)\n' %
 			(trans.x, trans.y, trans.z))
+
+	def write_camera_transform(self, matrix):
+
+#		m = Blender.Mathutils.Matrix(
+#			[ 1.0,  0.0,   0.0, 0.0],
+#			[ 0.0,  1.0,   0.0, 0.0],
+#			[ 0.0,  0.0,  -1.0, 0.0],
+#			[ 0.0,  0.0,   0.0, 1.0]) * matrix
+
+		m = Blender.Mathutils.Matrix(
+			[ matrix[0][0],  matrix[0][1],  matrix[0][2],  matrix[0][3]],
+			[ matrix[1][0],  matrix[1][1],  matrix[1][2],  matrix[1][3]],
+			[-matrix[2][0], -matrix[2][1], -matrix[2][2], -matrix[2][3]],
+			[ matrix[3][0],  matrix[3][1],  matrix[3][2],  matrix[3][3]])
+
+		if (self.verbose > 0):
+
+			trans = m.translationPart()
+#			scale = m.scalePart()
+#			euler = m.toEuler()
+
+			self.file.write('## Translate (%s, %s, %s)\n' %
+				(trans.x, trans.y, trans.z))
+
+#			self.file.write('## Scale (%s, %s, %s)\n' %
+#				(scale.x, scale.y, scale.z))
+#
+#			self.file.write('## Rotate (%s, 1, 0, 0)\n' %
+#				euler.x)
+#
+#			self.file.write('## Rotate (%s, 0, 1, 0)\n' %
+#				euler.y)
+#
+#			self.file.write('## Rotate (%s, 0, 0, 1)\n' %
+#				euler.z)
+
+		self.write_set_transform(m)
 
 	def write_move_scale_rotate(self, matrix):
 		"""
@@ -1333,7 +1375,7 @@ class gelato_pyg(object):
 
 		# transform
 
-		self.write_move_scale_rotate(matrix)
+		self.write_camera_transform(matrix)
 
 		# clipping planes
 
@@ -1380,6 +1422,7 @@ class gelato_pyg(object):
 		# depth of field
 
 		if (self.enable_dof and (self.current_pass == self.passes.beauty)):
+
 			self.file.write('Attribute ("int dofquality", %d)\n' %
 				self.dofquality)
 
@@ -1397,6 +1440,7 @@ class gelato_pyg(object):
 		# motion blur
 
 		if (self.enable_motion_blur and (self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion])):
+
 			self.file.write('Attribute ("int temporalquality", %s)\n' %
 				self.temporal_quality)
 
@@ -1406,6 +1450,7 @@ class gelato_pyg(object):
 		# stereo camera
 
 		if (self.enable_stereo and (self.current_pass == self.passes.beauty)):
+
 			self.file.write('Attribute ("float stereo:separation", %s)\n' %
 				float(self.stereo_separation))
 
@@ -1428,7 +1473,7 @@ class gelato_pyg(object):
 	def write_camera_light(self, obj, lamp, name, matrix):
 		self.file.write('\nPushTransform ()\n')
 
-		self.write_move_scale_rotate(matrix)
+		self.write_camera_transform(matrix)
 
 		cname = self.camera_shadow_name(name)
 
@@ -1468,7 +1513,7 @@ class gelato_pyg(object):
 	def write_camera_photon_map(self, obj, lamp, name, matrix, projection = 'perspective'):
 		self.file.write('\nPushTransform ()\n')
 
-		self.write_move_scale_rotate(matrix)
+		self.write_camera_transform(matrix)
 
 		cname = self.camera_photon_map_name(name)
 
@@ -1505,7 +1550,7 @@ class gelato_pyg(object):
 		self.file.write('\n')
 
 	def write_script(self, name):
-		if (name is None):
+		if (not name):
 			return
 
 		try:
@@ -1515,60 +1560,17 @@ class gelato_pyg(object):
 				print 'Error: invalid script "%s"' % name
 			return
 
-		if ((txt is None) or (txt.nlines == 0)):
+		if ((txt is None) or (txt.nlines < 1)):
 			return
 
-		self.file.write('\nInput ("pyg << ')
+		self.file.write('## Script start: "%s"\n' % name)
 
 		for line in txt.asLines():
 			if (line):
-				self.file.write(escape_quote(line))
-				self.file.write('\\n')
+				self.file.write(line)
+				self.file.write('\n')
 
-		self.file.write('")\n')
-
-	def write_mesh(self, name, material_index, material_max, mbur_index, mbux_max, single_sided, interpolation, nverts,\
-			verts, points, normals = [], vertexcolor = [], holes = [], s = [], t = []):
-
-		if (single_sided):
-			self.file.write('Attribute ("int twosided", 0)\n')
-
-		if (self.enable_split):
-			fobj_name = self.file_object_name(name, material_index, material_max, mbur_index, mbux_max)
-
-			self.file.write('Input ("%s")\n' % fobj_name)
-
-			if (fobj_name not in self.fileobject_memo):
-
-				wfile = open(fobj_name, 'wb')
-				self.fileobject_memo.append(fobj_name)
-
-				if (self.verbose > 1):
-					print 'Info: exporting object file "%s"' % fobj_name
-			else:
-				return
-		else:
-			wfile = self.file
-
-		if ((self.verbose > 0) and ((mbur_index < 1) or self.enable_split)):
-			wfile.write('## Points: %s\n' % (len(points) / 3))
-			wfile.write('## Faces:  %s\n' % len(nverts))
-
-		wfile.write('Mesh ("%s"' % interpolation)
-
-		self.write_array(wfile, nverts,      ',', True)
-		self.write_array(wfile, verts,       ',', True)
-		self.write_array(wfile, points,      ',"vertex point P",')
-		self.write_array(wfile, normals,     ',"vertex normal N",')
-		self.write_array(wfile, vertexcolor, ',"vertex color C",')
-		self.write_array(wfile, s,           ',"linear float s",')
-		self.write_array(wfile, t,           ',"linear float t",')
-		self.write_array(wfile, holes,       ',"int[%d] holes",' % len(holes), True)
-
-		wfile.write(')\n')
-
-		if (self.enable_split):
-			wfile.close()
+		self.file.write('## Script end: "%s"\n' % name)
 
 	def generate_camera_shadows(self, obj, matrices):
 		global lights_assign
@@ -1603,7 +1605,9 @@ class gelato_pyg(object):
 		if (obj.type != 'Lamp'):
 			return
 
-		if (not property_boolean_get(obj, 'photon_map')):
+		photon_map = property_boolean_get(obj, 'photon_map')
+
+		if (not photon_map):
 			return
 
 		name = obj.name
@@ -1668,16 +1672,25 @@ class gelato_pyg(object):
 				self.write_spotlight(obj, lamp, mat)
 			else:
 				if (self.verbose > 1):
-					print 'Info: exclude lamp "%s"' % name
+					print 'Info: excluded lamp "%s"' % name
 
-	def write_geometry_head(self, name, matrices, disable_indirect):
+	def write_geometry_head(self, obj, matrices):
+
+		indirect_light = property_boolean_get(obj, 'indirect_light', True)
 
 		self.file.write('\nPushAttributes ()\n')
 
-		self.file.write('Attribute ("string name", "%s")\n' %
-			self.object_name(name))
+		# prescript
 
-		if (disable_indirect):
+		if (self.enable_scripts and property_boolean_get(obj, 'enable_prescript')):
+			prescript = property_string_get(obj, 'prescript')
+			if (prescript):
+				self.write_script(prescript)
+
+		self.file.write('Attribute ("string name", "%s")\n' %
+			self.object_name(obj.name))
+
+		if (not indirect_light):
 			self.file.write('Attribute ("string geometryset", "-indirect")\n')
 
 		self.write_motion(len(matrices))
@@ -1685,7 +1698,15 @@ class gelato_pyg(object):
 		for m in matrices:
 			self.write_set_transform(m)
 
-	def write_geometry_tail(self):
+	def write_geometry_tail(self, obj):
+
+		# postscript
+
+		if (self.enable_scripts and property_boolean_get(obj, 'enable_postscript')):
+			postscript = property_string_get(obj, 'postscript')
+			if (postscript):
+				self.write_script(postscript)
+
 		self.file.write('PopAttributes ()\n')
 
 	def write_material_head(self, name, material, bake_diffuse):
@@ -1750,6 +1771,7 @@ class gelato_pyg(object):
 					if (mtex.mapto & Blender.Texture.MapTo.COL):
 						textures_color.append(self.data_texture(mtex.tex.getName(),
 							filename,
+							mtex.uvlayer,
 							mtex.mapping,
 							mtex.tex.extend,
 							mtex.texco))
@@ -1759,6 +1781,7 @@ class gelato_pyg(object):
 					if (mtex.mapto & Blender.Texture.MapTo.DISP):
 						textures_displacement.append(self.data_texture(mtex.tex.getName(),
 							filename,
+							mtex.uvlayer,
 							mtex.mapping,
 							mtex.tex.extend,
 							mtex.texco,
@@ -1766,14 +1789,30 @@ class gelato_pyg(object):
 
 		self.file.write('PushAttributes ()\n')
 
+		# prescript
+
+		if (self.enable_scripts and property_boolean_get(material, 'enable_prescript')):
+			prescript = property_string_get(material, 'prescript')
+			if (prescript):
+				self.write_script(prescript)
+
 		if (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows]):
+
+			# script
+
+			if (self.enable_scripts and property_boolean_get(material, 'enable_script')):
+				script = property_string_get(material, 'script')
+				if (script):
+					self.write_script(script)
+				return
 
 			# color
 
-			self.file.write('Attribute ("color C", (%s, %s, %s))\n' % (
-				round(material.R, self.PRECISION),
-				round(material.G, self.PRECISION),
-				round(material.B, self.PRECISION)))
+			if (not (flags & Blender.Material.Modes.TEXFACE)):
+				self.file.write('Attribute ("color C", (%s, %s, %s))\n' % (
+					round(material.R, self.PRECISION),
+					round(material.G, self.PRECISION),
+					round(material.B, self.PRECISION)))
 
 			# alpha
 
@@ -1796,7 +1835,8 @@ class gelato_pyg(object):
 				for ftex in textures_color:
 					if (self.verbose > 0):
 						self.file.write('## Texture color: "%s"\n' % ftex.name)
-					self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
+
+					self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.filename))
 					self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
 					self.file.write('Shader ("surface", "pretexture")\n')
 
@@ -1842,7 +1882,7 @@ class gelato_pyg(object):
 				if (self.verbose > 0):
 					self.file.write('## Texture displacement: "%s"\n' % ftex.name)
 
-				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.file))
+				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.filename))
 				self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
 				self.file.write('Parameter ("float Km", %s)\n' %  round(ftex.disp, self.PRECISION))
 				self.file.write('Shader ("displacement", "dispmap")\n')
@@ -1908,9 +1948,22 @@ class gelato_pyg(object):
 
 		self.file.write('PopAttributes ()\n')
 
+	def write_material_postscript(self, material):
+		if (material is None):
+			return
+
+		# postscript
+
+		if (self.enable_scripts and property_boolean_get(material, 'enable_postscript')):
+			postscript = property_string_get(material, 'postscript')
+			if (postscript):
+				self.write_script(postscript)
+
 	def process_obj_transformation(self, obj, mblur, dup = False):
 
-		if (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and (mblur and property_boolean_get(obj, 'motionblur_transformation', True)))):
+		motionblur_transformation = property_boolean_get(obj, 'motionblur_transformation', True)
+
+		if (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and (mblur and motionblur_transformation))):
 
 			return [obj.matrix]
 
@@ -1950,20 +2003,21 @@ class gelato_pyg(object):
 
 		# motion blur deformation
 
-		if  (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and  self.enable_motion_blur and property_boolean_get(obj, 'motionblur_deformation'))):
+		motionblur_deformation = property_boolean_get(obj, 'motionblur_deformation')
+
+		if  (not ((self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion]) and  self.enable_motion_blur and  motionblur_deformation)):
 
 			mesh = Blender.Mesh.New()
 			mesh.getFromObject(obj, 0, 1)
 
 			return [mesh]
-
 		else:
 			# get current frame number
 
 			curframe = Blender.Get('curframe')
 
 			try:
-				meshs = []
+				meshes = []
 
 				for i in xrange(self.frames_deformation - 1, -1, -1):
 
@@ -1976,9 +2030,9 @@ class gelato_pyg(object):
 					mesh = Blender.Mesh.New()
 					mesh.getFromObject(obj, 0, 1)
 
-					meshs.append(mesh)
+					meshes.append(mesh)
 
-				return meshs
+				return meshes
 
 			finally:
 				# restore frame number
@@ -1993,138 +2047,178 @@ class gelato_pyg(object):
 
 		name = obj.name
 
+		# get meshes
+
 		try:
 
-			meshs = self.process_mesh_deformation(obj)
+			meshes = self.process_mesh_deformation(obj)
 
 		except:
 			if (self.verbose > 0):
 				sys.excepthook(*sys.exc_info())
 			return
 
-		nmeshs = len(meshs)
-		if (nmeshs == 0):
+		nmeshes = len(meshes)
+		if (nmeshes < 1):
 			return
 
-		nfaces = len(meshs[0].faces)
-		if (nfaces == 0):
+		nfaces = len(meshes[0].faces)
+		if (nfaces < 1):
 			return
 
 		# get properties
 
-		catmull_clark    = property_boolean_get(obj, 'catmull_clark')
-		bake_diffuse     = property_boolean_get(obj, 'bake_diffuse')
-		disable_indirect = property_boolean_get(obj, 'disable_indirect')
-		enable_proxy     = property_boolean_get(obj, 'enable_proxy')
+		catmull_clark = property_boolean_get(obj, 'catmull_clark')
+		raster_width  = property_boolean_get(obj, 'raster_width')
+		bake_diffuse  = property_boolean_get(obj, 'bake_diffuse')
+		enable_proxy  = property_boolean_get(obj, 'enable_proxy')
 
 		# interpolation type
 
 		interpolation = ('catmull-clark' if (catmull_clark) else 'linear')
 
-		# proxy file
-
-		proxy_file = (property_get(obj, 'proxy_file') if (enable_proxy) else '')
-
 		# single sided face
 
-		single_sided = not (self.all_double_sided or (meshs[0].mode & Blender.Mesh.Modes.TWOSIDED))
+		single_sided = not (self.all_double_sided or (meshes[0].mode & Blender.Mesh.Modes.TWOSIDED))
 
-		# if NURBS smooth surface
+		# if NURBS smooth surfaces
 
-		smooth = (obj.type == 'Surf')
-
-		# UV map
-
-		faceuv = meshs[0].faceUV
+		all_smooth = (obj.type == 'Surf')
 
 		# vertex color
 
-		vtcolor = meshs[0].vertexColors
+		vtcolor = meshes[0].vertexColors
 
-		# loop all meshs
+		# UV map
+
+		faceuv = (self.enable_uv and meshes[0].faceUV)
+
+		# loop meshes
 
 		db_mesh = []
 
-		for mesh in meshs:
-
-			# init geometry
-
-			dm = self.data_mesh()
-			db_mesh.append(dm)
+		for mesh in meshes:
 
 			if (vtcolor):
 				nlist_col = range(len(mesh.verts))
 
-			# geometry faces
+			# new mesh
 
-			for i, face in enumerate(mesh.faces):
+			dmesh = self.data_mesh(mesh.renderUVLayer)
+			db_mesh.append(dmesh)
 
-				if (face.smooth):
-					smooth = True
+			db_geometry = dmesh.db_geometry
 
-				nv = len(face.verts)
-				dm.nverts.append(nv)
+			# loop faces
 
-				geo = dm.db_geometry.get(face.mat)
-				if (geo is None):
-					geo = self.data_geometry()
-					dm.db_geometry[face.mat] = geo
+			for index_face, face in enumerate(mesh.faces):
 
-				geo.index.append(i)
-				geo.nverts.append(nv)
+				fsmooth = face.smooth
+				nverts  = len(face.verts)
 
-				for v in face.verts:
-					idx = v.index
-					dm.verts.append(idx)
-					geo.verts.append(idx)
+				# new geometry
 
-				if (faceuv):
-					for uv in face.uv:
-						geo.s.append(round(      uv[0], self.PRECISION))
-						geo.t.append(round(1.0 - uv[1], self.PRECISION))
+				dgeometry = db_geometry.setdefault(face.mat, self.data_geometry())
+
+				if (fsmooth):
+					dgeometry.smooth = True
+
+				dgeometry.index_faces.append(index_face)
+
+				if (catmull_clark):
+					dmesh.nverts.append(nverts)
+				else:
+					dgeometry.nverts.append(nverts)
+
+				# loop vertexes
+
+				if (catmull_clark):
+
+					for v in face.verts:
+
+						# vertexes index
+
+						dmesh.verts.append(v.index)
+				else:
+
+					for v in face.verts:
+
+						# vertexes index
+
+						dgeometry.verts.append(v.index)
+
+						# normals
+
+						no = (v.no if (all_smooth or fsmooth) else face.no)
+
+						dgeometry.normals.extend([no[0], no[1], no[2]])
 
 				if (vtcolor):
 					for j in xrange(len(face.verts)):
 						c = face.col[j]
 						nlist_col[face.verts[j].index] = [c.r, c.g, c.b]
-			# geometry points
 
-			nlist_nor = []
+			# loop vertexes
+
 			for v in mesh.verts:
-				dm.points.extend([v.co.x, v.co.y, v.co.z])
-				nlist_nor.append(v.no)
 
-			# geometry normals
+				# points
 
-			if (smooth and (not catmull_clark)):
-				for face in mesh.faces:
-					if (face.smooth):
-						continue
-					for v in face.verts:
-						nlist_nor[v.index] = face.no
-
-				for nor in nlist_nor:
-					dm.normals.extend([nor[0], nor[1], nor[2]])
+				dmesh.points.extend([v.co.x, v.co.y, v.co.z])
 
 			# vertex color
 
 			if (vtcolor):
 				for c in nlist_col:
 					try:
-						dm.vertexcolor.extend([c[0]/255.0, c[1]/255.0, c[2]/255.0])
+						dmesh.vertexcolors.extend([c[0]/255.0, c[1]/255.0, c[2]/255.0])
 					except:
-						dm.vertexcolor.extend([0.0, 0.0, 0.0])
+						dmesh.vertexcolors.extend([0.0, 0.0, 0.0])
 
-		ndm = len(db_mesh)
+			# UV layers
 
-		if (ndm != nmeshs):
+			if (faceuv):
+
+				# save UV layer name
+
+				actlname = mesh.activeUVLayer
+
+				try:
+					(ua, ub) = ((1.0, -1.0) if self.flip_u else (0.0, 1.0))
+					(va, vb) = ((1.0, -1.0) if self.flip_v else (0.0, 1.0))
+
+					for lname in mesh.getUVLayerNames():
+
+						# select UV layer name
+
+						mesh.activeUVLayer = lname
+
+						for face in mesh.faces:
+
+							uvlayers = dmesh.db_geometry[face.mat].uvlayers
+
+							st = uvlayers.setdefault(lname, self.data_st())
+
+							for uv in face.uv:
+								st.s.append(round(ua + ub * uv[0], self.PRECISION))
+								st.t.append(round(va + vb * uv[1], self.PRECISION))
+
+				finally:
+					# restore UV layer name
+
+					mesh.activeUVLayer = actlname
+
+		nmesh = len(db_mesh)
+
+		if (nmesh != nmeshes):
 			raise GelatoError, sys._getframe(0).f_code.co_name + ' invalid number of items'
 
-		self.write_geometry_head(name, matrices, disable_indirect)
+		self.write_geometry_head(obj, matrices)
 
 		# bake diffuse
 
 		if (bake_diffuse and (self.current_pass == self.passes.bake_diffuse)):
+
 			self.file.write('Attribute ("int cull:occlusion", 0)\n')
 			self.file.write('Attribute ("int dice:rasterorient", 0)\n')
 
@@ -2132,6 +2226,7 @@ class gelato_pyg(object):
 			file_name = self.file_diffuse_name(name)
 
 			if (shader_bake_diffuse is not None):
+
 				sd = copy.deepcopy(shader_bake_diffuse)
 				sd['filename'] = file_name
 				self.file.write(str(sd))
@@ -2144,84 +2239,185 @@ class gelato_pyg(object):
 
 		# proxy
 
-		if (enable_proxy and proxy_file):
+		if (enable_proxy):
 
-			materials = obj.getMaterials()
+			proxy_file = property_string_get(obj, 'proxy_file')
 
-			mat = None
+			if (proxy_file):
 
-			if ((len(materials) > 0) and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
-				mat = materials[0]
-				self.write_material_head(name, mat, bake_diffuse)
+				materials = obj.getMaterials()
 
-			self.file.write('Input ("%s")\n' % fix_file_name(self.construct_path(proxy_file)))
+				mat = None
 
-			if (mat):
-				self.write_material_tail(mat)
+				if ((len(materials) > 0) and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
+					mat = materials[0]
+					self.write_material_head(name, mat, bake_diffuse)
+
+				self.write_material_postscript(mat)
+
+				self.file.write('Input ("%s")\n' % fix_file_name(self.construct_path(proxy_file)))
+
+				if (mat):
+					self.write_material_tail(mat)
 
 		else:
 			# materials
 
-			multiple_mat = len(mesh.materials) > 1
+			multiple_mat = len(meshes[0].materials) > 1
 			if (multiple_mat and catmull_clark):
 				set_mat = set(range(nfaces))
 
-			ngeo = len(db_mesh[0].db_geometry)
+			ngeometry  = len(db_mesh[0].db_geometry)
 
-			for mi, geo in db_mesh[0].db_geometry.iteritems():
+			for mat_index, dgeometry in db_mesh[0].db_geometry.iteritems():
 
 				mat = None
 
 				try:
-					if (obj.colbits & (1 << mi)):
+					if (obj.colbits & (1 << mat_index)):
 						# object's material
-						mat = obj.getMaterials()[mi]
+						mat = obj.getMaterials()[mat_index]
 					else:
 						# mesh's material
-						mat = mesh.materials[mi]
+						mat = meshes[0].materials[mat_index]
 
 				except:
-					if (self.verbose > 0):
+					if (self.verbose > 1):
 						sys.excepthook(*sys.exc_info())
+
+				flags = mat.mode
+
+				halo = (self.enable_halos and (flags & Blender.Material.Modes.HALO))
+
+				# material
 
 				self.write_material_head(name, mat, bake_diffuse)
 
-				# vertex color
+				# material script
 
-				if (mat and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
-					flags = mat.mode
-
-					if (not (flags & Blender.Material.Modes.VCOL_PAINT)):
-						vertexcolor = []
+				self.write_material_postscript(mat)
 
 				# multiple materials on a single mesh
 
 				if (multiple_mat and catmull_clark):
-					holes = list(set_mat - set(geo.index))
+					holes = list(set_mat - set(dgeometry.index_faces))
 				else:
 					holes = []
+
+				# nverts and verts
+
+				if (catmull_clark):
+					nverts = dmesh.nverts
+					verts  = dmesh.verts
+				else:
+					nverts = dgeometry.nverts
+					verts  = dgeometry.verts
+
+				# vertex color
+
+				vertexcolors = dmesh.vertexcolors
+
+				if (mat and (self.current_pass not in [self.passes.ambient_occlusion, self.passes.shadows])):
+
+					if (not (self.enable_vextex_color and (flags & Blender.Material.Modes.VCOL_PAINT))):
+						vertexcolors = []
 
 				# motion blur
 
 				if (self.current_pass != self.passes.shadows):
-					self.write_motion(ndm)
+					self.write_motion(nmesh)
 
 				# geometry
 
-				for m, dm in enumerate(db_mesh):
+				for mesh_index, dmesh in enumerate(db_mesh):
 
-					geo = dm.db_geometry[mi]
+					if (not self.enable_split):
 
-					if (catmull_clark):
-						self.write_mesh(name, mi, ngeo, m, ndm, single_sided, interpolation, dm.nverts,
-							dm.verts, dm.points, dm.normals, dm.vertexcolor, holes, geo.s, geo.t)
+						wfile = self.file
 					else:
-						self.write_mesh(name, mi, ngeo, m, ndm, single_sided, interpolation, geo.nverts,
-							geo.verts, dm.points, dm.normals, dm.vertexcolor, [],   geo.s, geo.t)
+
+						fobj_name = self.file_object_name(name, mat_index, ngeometry, mesh_index, nmesh)
+
+						self.file.write('Input ("%s")\n' % fobj_name)
+
+						if (fobj_name not in self.fileobject_memo):
+
+							wfile = open(fobj_name, 'wb')
+							self.fileobject_memo.append(fobj_name)
+
+							if (self.verbose > 1):
+								print 'Info: exporting object file "%s"' % fobj_name
+						else:
+							continue
+
+					points    = dmesh.points
+					uvname    = dmesh.uvname
+					dgeometry = dmesh.db_geometry[mat_index]
+
+					uvlayers  = dgeometry.uvlayers
+
+					npoint = len(points) / 3
+
+					# normals
+
+					normals = (dgeometry.normals if (all_smooth or dgeometry.smooth) else [])
+
+					# write mesh
+
+					if (single_sided):
+						self.file.write('Attribute ("int twosided", 0)\n')
+
+					if ((self.verbose > 0) and (not halo) and ((mesh_index < 1) or self.enable_split)):
+
+						wfile.write('## Points: %s\n' % npoint)
+						wfile.write('## Faces: %s\n' % len(nverts))
+
+						if (self.enable_uvlayes):
+							for lname in sorted(uvlayers):
+								wfile.write('## UV: "%s"%s\n' % (lname, (' default' if (lname == uvname) else '')))
+
+					if (halo):
+						width = ('rasterwidth' if raster_width else 'width')
+
+						wfile.write('Points (%s,"float %s",%s' %
+							(npoint, width, mat.haloSize))
+
+						self.write_array(wfile, points, ',"vertex point P",')
+					else:
+						wfile.write('Mesh ("%s"' % interpolation)
+
+						self.write_array(wfile, nverts,       ',', True)
+						self.write_array(wfile, verts,        ',', True)
+						self.write_array(wfile, points,       ',"vertex point P",')
+						self.write_array(wfile, normals,      ',"linear normal N",')
+						self.write_array(wfile, vertexcolors, ',"vertex color C",')
+						self.write_array(wfile, holes,        ',"int[%d] holes",' % len(holes), True)
+
+						# UV
+
+						if (uvlayers):
+							for lname, st in uvlayers.iteritems():
+								if (lname == uvname):
+									s = 's'
+									t = 't'
+								else:
+									if (not self.enable_uvlayes):
+										continue
+
+									s = 's_' + lname
+									t = 't_' + lname
+
+								self.write_array(wfile, st.s, ',"linear float %s",' % s)
+								self.write_array(wfile, st.t, ',"linear float %s",' % t)
+
+					wfile.write(')\n')
+
+					if (self.enable_split):
+						wfile.close()
 
 				self.write_material_tail(mat)
 
-		self.write_geometry_tail()
+		self.write_geometry_tail(obj)
 
 	def visible(self, obj):
 		"""
@@ -2235,12 +2431,12 @@ class gelato_pyg(object):
 		return True
 
 	def build(self, obj, fc, mblur = False):
-		if ((not self.visible(obj)) or property_boolean_get(obj, 'exclude')):
+		if ((not self.visible(obj)) or property_boolean_get(obj, 'excluded')):
 			return
 
 		self.instance = None
 
-		if (self.dup_verts):
+		if (self.enable_dupli_verts):
 			try:
 				# get duplicate object
 				dupobjs = obj.DupObjects
@@ -2349,6 +2545,7 @@ class gelato_pyg(object):
 
 		self.file.write('## Exported by Blender Gelato %s\n##\n' % __version__)
 		self.file.write(datetime.datetime.today().strftime('## Timestamp: %Y-%m-%d %H:%M:%S\n'))
+		self.file.write('## Scene: %s\n' % self.scene.name)
 
 		try:
 			self.file.write('## User: %s\n' % getpass.getuser())
@@ -2364,9 +2561,16 @@ class gelato_pyg(object):
 			self.file.write('## Frame: %d/%d\n' %
 				(self.frame, self.nframes))
 
+		self.file.write('\n')
+
+		# header prescript
+
+		if (self.enable_scripts and self.enable_header_prescript and self.header_prescript):
+			self.write_script(self.header_prescript)
+
 		# verbose
 
-		self.file.write('\nAttribute ("int verbosity", %d)\n' %
+		self.file.write('Attribute ("int verbosity", %d)\n' %
 			self.verbose)
 
 		# error filename
@@ -2519,6 +2723,11 @@ class gelato_pyg(object):
 			self.file.write('Attribute ("float dice:motionfactor", %s)\n' %
 				self.dice_motionfactor)
 
+		# header postscript
+
+		if (self.enable_scripts and self.enable_header_postscript and self.header_postscript):
+			self.write_script(self.header_postscript)
+
 		# camera/s
 
 		if (self.current_pass != self.passes.photon_map):
@@ -2538,7 +2747,7 @@ class gelato_pyg(object):
 
 		if (self.enable_viewer and
 			(self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion, self.passes.bake_diffuse])):
-				self.write_device(self.title, 'iv', self.data_color, self.camera_name)
+				self.write_device(self.title + ' - ' + self.scene.name, 'iv', self.data_color, self.camera_name)
 
 		# ambient occlusion
 
@@ -2574,17 +2783,24 @@ class gelato_pyg(object):
 			self.file.write('\nAttribute ("string spatialdb:read", "%s")\n' %
 				str(self.output_photon_map))
 
-		# script
-
-		if (self.enable_script_header):
-			self.write_script(self.script_header)
-
 		self.file.write('\nWorld ()\n')
+
+		# world prescript
+
+		if (self.enable_scripts and self.enable_world_prescript and self.world_prescript):
+			self.file.write('\n')
+			self.write_script(self.world_prescript)
 
 	def write_tail(self):
 		"""
 		Write the final part of pyg file.
 		"""
+
+		# world postscript
+
+		if (self.enable_scripts and self.enable_world_postscript and self.world_postscript):
+			self.file.write('\n')
+			self.write_script(self.world_postscript)
 
 		self.file.write('\nRender ("%s")\n\n'
 			% self.camera_name)
@@ -2999,52 +3215,80 @@ class cfggui(object):
 
 		self.cmd_mask = ('""%s" "%s""' if (WINDOWS) else '"%s" "%s"&')
 
-		self.menu_surface  = None
-		self.menu_light    = None
+		self.active_obj = None
+		self.active_mat = None
 
-		self.menu_material = None
-		self.menu_lamp     = None
-		self.menu_text     = None
+		self.menu_surface    = None
+		self.menu_light      = None
+		self.menu_material   = None
+		self.menu_lamp       = None
+		self.menu_script     = None
+		self.menu_postscript = None
+		self.menu_prescript  = None
 
-		self.active_obj  = None
-		self.active_lamp = None
+		self.id_enable_header_postscript = None
+		self.id_enable_header_prescript  = None
+		self.id_enable_world_postscript  = None
+		self.id_enable_world_prescript   = None
 
-		self.id_enable_obj_exclude           = None
-		self.id_enable_obj_catmull_clark     = None
-		self.id_enable_obj_bake_diffuse      = None
-		self.id_enable_obj_disable_indirect  = None
-		self.id_enable_obj_mb_transformation = None
-		self.id_enable_obj_mb_deformation    = None
-		self.id_enable_obj_enable_proxy      = None
-		self.id_enable_obj_proxy_file        = None
+		self.list_obj_property = [
 
-		self.id_enable_lamp_exclude    = None
-		self.id_enable_lamp_photon_map = None
+			# ID			     # persistent	       # property
+
+			['id_obj_excluded',          '_obj_excluded',          'excluded'],
+			['id_obj_enable_postscript', '_obj_enable_postscript', 'enable_postscript'],
+			['id_obj_enable_prescript',  '_obj_enable_prescript',  'enable_prescript'],
+
+			['id_geo_catmull_clark',     '_geo_catmull_clark',     'catmull_clark'],
+			['id_geo_raster_width',      '_geo_raster_width',      'raster_width'],
+			['id_geo_bake_diffuse',      '_geo_bake_diffuse',      'bake_diffuse'],
+			['id_geo_indirect_light',    '_geo_indirect_light',    'indirect_light'],
+			['id_geo_mb_transformation', '_geo_mb_transformation', 'motionblur_transformation'],
+			['id_geo_mb_deformation',    '_geo_mb_deformation',    'motionblur_deformation'],
+			['id_geo_enable_proxy',      '_geo_enable_proxy',      'enable_proxy'],
+			['id_geo_proxy_file',        '_geo_proxy_file',        'proxy_file'],
+
+			['id_lamp_photon_map',       '_lamp_photon_map',       'photon_map'],
+		]
+
+		self.list_mat_property = [
+
+			# ID			     # persistent	       # property
+
+			['id_mat_enable_script',     '_mat_enable_script',     'enable_script'],
+			['id_mat_enable_postscript', '_mat_enable_postscript', 'enable_postscript'],
+			['id_mat_enable_prescript',  '_mat_enable_prescript',  'enable_prescript'],
+		]
+
+		for l in [self.list_obj_property, self.list_mat_property]:
+			for (id_obj, dummy1, dummy2) in l:
+				setattr(self, id_obj, None)
 
 		self.panels = [
 			self.panel('Output',         '_panel_output', self.panel_output, 'Panel output data'),
+			self.panel('Objects',        '_panel_objects', self.panel_objects, 'Panel objects'),
 			self.panel('Geometries',     '_panel_geometries', self.panel_geometries, 'Panel geometries'),
-			self.panel('Ray traced',     '_panel_ray_traced', self.panel_ray_traced, 'Panel ray traced'),
+			self.panel('Lights',         '_panel_lights', self.panel_lights, 'Panel lights'),
 			self.panel('Textures',       '_panel_textures', self.panel_textures, 'Panel textures'),
 			self.panel('Stereo',         '_panel_stereo', self.panel_stereo, 'Panel stereo (anaglyph) rendering'),
-			self.panel('Environment',    '_panel_environment', self.panel_environment, 'Panel environment'),
 
 			self.panel('Images',         '_panel_images', self.panel_images, 'Panel images'),
 			self.panel('Shaders',        '_panel_shaders', self.panel_shaders, 'Panel shaders'),
-			self.panel('Lights',         '_panel_lights', self.panel_lights, 'Panel lights'),
+			self.panel('Ray traced',     '_panel_ray_traced', self.panel_ray_traced, 'Panel ray traced'),
 			self.panel('Displacement',   '_panel_displacement', self.panel_displacement, 'Panel displacement'),
 			self.panel('Motion Blur',    '_panel_motion_blur', self.panel_motion_blur, 'Panel Motion Blur'),
 			self.panel('Depth of Field', '_panel_dof', self.panel_dof, 'Panel depth of field'),
 
 			self.panel('Shadows',        '_panel_shadows', self.panel_shadows, 'Panel select shadows type'),
-			self.panel('Caustics',       '_panel_caustics', self.panel_caustics, 'Panel caustics'),
 			self.panel('AO',             '_panel_ambient_occlusion', self.panel_ambient_occlusion, 'Panel ambient occlusion'),
 			self.panel('SSS',            '_panel_sss', self.panel_sss, 'Panel SubSurface Scattering'),
+			self.panel('Caustics',       '_panel_caustics', self.panel_caustics, 'Panel caustics'),
 			self.panel('Indirect Light', '_panel_indirectlight', self.panel_indirect_light, 'Panel indirect light'),
-			self.panel('Scripts',        '_panel_scripts', self.panel_scripts, 'Panel scripts'),
+			self.panel('Environment',    '_panel_environment', self.panel_environment, 'Panel environment'),
 
 			self.panel('Pass',           '_panel_pass', self.panel_pass, 'Panel select passes'),
 			self.panel('Rerender',       '_panel_rerender', self.panel_rerender, 'Panel select rerender'),
+			self.panel('Scripts',        '_panel_scripts', self.panel_scripts, 'Panel scripts'),
 		]
 
 		# ambient occlusion shader
@@ -3196,26 +3440,6 @@ class cfggui(object):
 
 			if (len(list_light) > 0):
 				self.menu_light = self.bake_menu('Shaders', list_light)
-
-		# object properties
-
-		self.object_properties = [
-			('exclude',                   '_enable_obj_exclude'),
-			('catmull_clark',             '_enable_obj_catmull_clark'),
-			('bake_diffuse',              '_enable_obj_bake_diffuse'),
-			('disable_indirect',          '_enable_obj_disable_indirect'),
-			('motionblur_transformation', '_enable_obj_mb_transformation'),
-			('motionblur_deformation',    '_enable_obj_mb_deformation'),
-			('enable_proxy',              '_enable_obj_enable_proxy'),
-			('proxy_file',                '_enable_obj_proxy_file'),
-		]
-
-		# lamp properties
-
-		self.lamp_properties = [
-			('exclude',    '_enable_lamp_exclude'),
-			('photon_map', '_enable_lamp_photon_map'),
-		]
 
 		# compression
 
@@ -3454,46 +3678,6 @@ class cfggui(object):
 	def occlusionmap_setup(sd):
 		sd['occlusionmap'] = '$FILE_PASS1'
 
-	def active_obj_load(self):
-		if (not self.active_obj):
-			return
-
-		for (property, name) in self.object_properties:
-			try:
-				persistents[name].val = property_get(self.active_obj, property)
-			except:
-				if (property == 'motionblur_transformation'):
-					try:
-						persistents[name].val = True
-						property_set(self.active_obj, property, True)
-					except:
-						if (base.verbose > 1):
-							sys.excepthook(*sys.exc_info())
-
-				elif (base.verbose > 1):
-					sys.excepthook(*sys.exc_info())
-
-	def active_obj_store(self):
-		if (not self.active_obj):
-			return
-
-		for (property, name) in self.object_properties:
-			property_set(self.active_obj, property, persistents[name].val)
-
-	def active_lamp_load(self):
-		if (not self.active_lamp):
-			return
-
-		for (property, name) in self.lamp_properties:
-			persistents[name].val = property_boolean_get(self.active_obj, property)
-
-	def active_lamp_store(self):
-		if (not self.active_lamp):
-			return
-
-		for (property, name) in self.lamp_properties:
-			property_set(self.active_obj, property, persistents[name].val)
-
 	def handle_event(self, evt, val):
 		global persistents
 
@@ -3543,19 +3727,46 @@ class cfggui(object):
 
 		# active object
 
-		if (evt in [self.id_enable_obj_exclude, self.id_enable_obj_catmull_clark, self.id_enable_obj_bake_diffuse,\
-			self.id_enable_obj_mb_transformation, self.id_enable_obj_mb_deformation,\
-			self.id_enable_obj_disable_indirect, self.id_enable_obj_enable_proxy]):
-				self.active_obj_store()
+		if (self.active_obj):
+			for (id_obj, name, property) in self.list_obj_property:
+				if (evt == getattr(self, id_obj)):
+					value = persistents[name].val
+					property_set(self.active_obj, property, value)
 
-		if (evt == self.id_enable_obj_proxy_file):
-			if (self.active_obj):
-				property_set(self.active_obj, 'proxy_file', persistents['_enable_obj_proxy_file'].val)
+					if ((id_obj == 'id_obj_enable_prescript') and not value):
+						property_set(self.active_obj, 'prescript', '')
+					elif ((id_obj == 'id_obj_enable_postscript') and not value):
+						property_set(self.active_obj, 'postscript', '')
 
-		# acrive lamp
+					break
 
-		if (evt in [self.id_enable_lamp_exclude, self.id_enable_lamp_photon_map]):
-			self.active_lamp_store()
+		# active material
+
+		if (self.active_mat):
+			for (id_mat, name, property) in self.list_mat_property:
+				if (evt == getattr(self, id_mat)):
+					value = persistents[name].val
+					property_set(self.active_mat, property, value)
+
+					if ((id_mat == 'id_mat_enable_script') and not value):
+						property_set(self.active_mat, 'script', '')
+					elif ((id_mat == 'id_mat_enable_prescript') and not value):
+						property_set(self.active_mat, 'prescript', '')
+					elif ((id_mat == 'id_mat_enable_postscript') and not value):
+						property_set(self.active_mat, 'postscript', '')
+
+					break
+
+		# scripts
+
+		if ((evt == self.id_enable_header_postscript) and not persistents['enable_header_postscript'].val):
+			persistents['header_postscript'] = Blender.Draw.Create('')
+		elif ((evt == self.id_enable_header_prescript) and not persistents['enable_header_prescript'].val):
+			persistents['header_prescript'] = Blender.Draw.Create('')
+		elif ((evt == self.id_enable_world_postscript) and not persistents['enable_world_postscript'].val):
+			persistents['world_postscript'] = Blender.Draw.Create('')
+		elif ((evt == self.id_enable_world_prescript) and not persistents['enable_world_prescript'].val):
+			persistents['world_prescript'] = Blender.Draw.Create('')
 
 		# passes
 
@@ -3666,15 +3877,59 @@ class cfggui(object):
 			sys.excepthook(*sys.exc_info())
 			Blender.Draw.PupMenu('Error%t|"' + str(strerror) + '"')
 
-	def cb_menu_text(self, id):
+	def cb_menu_header_postscript(self, id):
 		global persistents
 
-		persistents['script_header'] = Blender.Draw.Create(self.menu_text.convert(persistents['_select_script_header'].val))
+		if (self.menu_postscript):
+			persistents['header_postscript'] = Blender.Draw.Create(self.menu_postscript.convert(persistents['_select_postscript'].val))
 
-	def cb_script_start_remove(self, id):
+	def cb_menu_header_prescript(self, id):
 		global persistents
 
-		persistents['script_header'] = Blender.Draw.Create('')
+		if (self.menu_prescript):
+			persistents['header_prescript'] = Blender.Draw.Create(self.menu_prescript.convert(persistents['_select_prescript'].val))
+
+	def cb_menu_world_postscript(self, id):
+		global persistents
+
+		if (self.menu_postscript):
+			persistents['world_postscript'] = Blender.Draw.Create(self.menu_postscript.convert(persistents['_select_postscript'].val))
+
+	def cb_menu_world_prescript(self, id):
+		global persistents
+
+		if (self.menu_prescript):
+			persistents['world_prescript'] = Blender.Draw.Create(self.menu_prescript.convert(persistents['_select_prescript'].val))
+
+	def cb_menu_obj_prescript(self, id):
+		global persistents
+
+		if (self.active_obj and self.menu_prescript):
+			property_set(self.active_obj, 'prescript', self.menu_prescript.convert(persistents['_select_prescript'].val))
+
+	def cb_menu_obj_postscript(self, id):
+		global persistents
+
+		if (self.active_obj and self.menu_postscript):
+			property_set(self.active_obj, 'postscript', self.menu_postscript.convert(persistents['_select_postscript'].val))
+
+	def cb_menu_mat_script(self, id):
+		global persistents
+
+		if (self.active_mat and self.menu_script):
+			property_set(self.active_mat, 'script', self.menu_script.convert(persistents['_select_script'].val))
+
+	def cb_menu_mat_prescript(self, id):
+		global persistents
+
+		if (self.active_mat and self.menu_prescript):
+			property_set(self.active_mat, 'prescript', self.menu_prescript.convert(persistents['_select_prescript'].val))
+
+	def cb_menu_mat_postscript(self, id):
+		global persistents
+
+		if (self.active_mat and self.menu_postscript):
+			property_set(self.active_mat, 'postscript', self.menu_postscript.convert(persistents['_select_postscript'].val))
 
 	def cb_assign_material(self, id):
 		global persistents, materials_assign
@@ -3802,12 +4057,17 @@ class cfggui(object):
 		materials_assign[0]['bake_diffuse'].default()
 
 	def cb_refresh_active_object(self, id):
-		self.active_obj = selected_object(['Mesh', 'Surf'])
-		self.active_obj_load()
+		self.active_obj = selected_object()
 
-	def cb_refresh_active_lamp(self, id):
-		self.active_lamp = selected_object(['Lamp'])
-		self.active_lamp_load()
+	def cb_deleye_all_properties(self, id):
+		ret = Blender.Draw.PupMenu('Are You Sure ?%t|no%x1|yes%x2')
+		if (ret != 2):
+			return
+
+		for data in [Blender.Object.Get(), Blender.Material.Get()]:
+			for obj in data:
+				if (obj.properties.has_key('gelato')):
+					del obj.properties['gelato']
 
 	def cb_shadows(self, id):
 		if (id != self.id_shadow_maps):
@@ -3822,11 +4082,10 @@ class cfggui(object):
 			if (pan.id != id):
 				persistents[pan.reg_name].val = 0
 
-		if (persistents['_panel_geometries'].val):
-			self.cb_refresh_active_object(0)
-
-		if (persistents['_panel_lights'].val):
-			self.cb_refresh_active_lamp(0)
+		if (persistents['_panel_objects'].val or
+			persistents['_panel_geometries'].val or
+			persistents['_panel_lights'].val):
+				self.cb_refresh_active_object(0)
 
 	def cb_select(self, name):
 		global persistents
@@ -3841,10 +4100,8 @@ class cfggui(object):
 	def cb_proxyselect(self, name):
 		global persistents
 
-		persistents['_enable_obj_proxy_file'].val = os.path.abspath(name)
-
 		if (self.active_obj):
-			property_set(self.active_obj, 'proxy_file', persistents['_enable_obj_proxy_file'].val)
+			property_set(self.active_obj, 'proxy_file', os.path.abspath(name))
 
 	def cb_filename(self, id):
 		global persistents
@@ -3859,7 +4116,7 @@ class cfggui(object):
 	def cb_proxy_filename(self, id):
 		global persistents
 
-		Blender.Window.FileSelector(self.cb_proxyselect, '.pyg', persistents['_enable_obj_proxy_file'].val)
+		Blender.Window.FileSelector(self.cb_proxyselect, '.pyg', persistents['_geo_proxy_file'].val)
 
 	def panel_common(self):
 		global persistents
@@ -3925,7 +4182,7 @@ class cfggui(object):
 			help = 'Enable relative paths')
 
 		self.draw_toggle('Pack config', 100, '$pack_config',
-			help = 'Enable pack config file (%s)' % output_name_xml())
+			help = 'Enable pack config file (%s)' % output_filename_xml())
 
 		self.line_feed()
 
@@ -4133,64 +4390,188 @@ class cfggui(object):
 			self.draw_string('Rerender memory: ', 210, 30, 'rerender_memory',
 				help = 'Size of re-render caches in KB')
 
-	def panel_geometries(self):
+	def panel_objects(self):
 		global persistents
 
-		if (self.active_obj and (not persistents['_enable_obj_exclude'].val) and persistents['_enable_obj_enable_proxy'].val):
-			self.draw_text(self.color_text, 'Proxy use only the first material assigned to the object', 130, 2, 6)
-			self.line_feed()
-
-		self.draw_toggle('All double sided', 130, 'all_double_sided',
-			help = 'Enable all double sided faces')
-
-		self.draw_toggle('DupliVerts', 130, 'dup_verts',
-			help = 'Enable DupliVerts')
+		self.draw_button('Delete all properties', 130,
+			self.cb_deleye_all_properties, 'Delete all object\'s properties')
 
 		self.line_feed()
 
 		self.draw_button('Refresh object', 130,
 			self.cb_refresh_active_object, 'Refresh active object')
 
-		if (self.active_obj):
+		if (not self.active_obj):
+
+			self.draw_text(self.color_text, 'No object selected', 50, 2, 6)
+		else:
+
+			excluded = property_boolean_get(self.active_obj, 'excluded')
 
 			self.draw_text(self.color_text, 'Object: "%s"' % self.active_obj.name, 50, 2, 6)
 
 			self.line_feed()
 
-			self.id_enable_obj_exclude = self.draw_toggle('Exclude', 130, '_enable_obj_exclude',
-				help = 'Exclude geometry exports')
+			persistents['_obj_excluded'] = Blender.Draw.Create(excluded)
+			self.id_obj_excluded = self.draw_toggle('Excluded', 130, '_obj_excluded',
+				help = 'Excluded object exports')
 
-			if (not persistents['_enable_obj_exclude'].val):
+			if (not excluded):
+				if (persistents['enable_scripts'].val):
 
-				self.id_enable_obj_catmull_clark = self.draw_toggle('Catmull Clark', 130, '_enable_obj_catmull_clark',
-					help = 'Enable catmull-clark property')
+					l = 100
 
-				self.id_enable_obj_bake_diffuse = self.draw_toggle('Bake diffuse', 130, '_enable_obj_bake_diffuse',
-					help = 'Enable bake diffuse property')
+					texts = Blender.Text.Get()
 
-				self.id_enable_obj_disable_indirect = self.draw_toggle('Disable indirect', 130, '_enable_obj_disable_indirect',
-					help = 'Disable indirect light')
-
-				if (persistents['enable_motion_blur'].val):
 					self.line_feed()
 
-					self.id_enable_obj_mb_transformation = self.draw_toggle('Motion blur transformation', 160, '_enable_obj_mb_transformation',
+					enable_postscript = property_boolean_get(self.active_obj, 'enable_postscript')
+					persistents['_obj_enable_postscript'] = Blender.Draw.Create(enable_postscript)
+					self.id_obj_enable_postscript = self.draw_toggle('Object post-script', 130, '_obj_enable_postscript',
+						help = 'Enable post-script')
+
+					if (enable_postscript):
+
+						script = property_string_get(self.active_obj, 'postscript')
+
+						if (script):
+							self.draw_text(self.color_text, script, l, 2, 6)
+						elif (texts):
+							self.menu_postscript = self.bake_menu('Load post-script from text',
+								[[t.name, t.name] for t in texts])
+
+							self.draw_menu(self.menu_postscript, l, '_select_postscript',
+								self.cb_menu_obj_postscript, 'Select post-script')
+
+					self.line_feed()
+
+					enable_prescript  = property_boolean_get(self.active_obj, 'enable_prescript')
+					persistents['_obj_enable_prescript'] = Blender.Draw.Create(enable_prescript)
+					self.id_obj_enable_prescript = self.draw_toggle('Object pre-script', 130, '_obj_enable_prescript',
+						help = 'Enable pre-script')
+
+					if (enable_prescript):
+
+						script = property_string_get(self.active_obj, 'prescript')
+
+						if (script):
+							self.draw_text(self.color_text, script, l, 2, 6)
+						elif (texts):
+							self.menu_prescript = self.bake_menu('Load pre-script from text',
+								[[t.name, t.name] for t in texts])
+
+							self.draw_menu(self.menu_prescript, l, '_select_prescript',
+								self.cb_menu_obj_prescript, 'Select pre-script')
+
+	def panel_geometries(self):
+		global persistents
+
+		obj_ok       = False
+		excluded     = False
+		enable_proxy = False
+
+		if (self.active_obj):
+
+			obj_ok = self.active_obj.type in ['Mesh', 'Surf']
+
+			if (obj_ok):
+
+				excluded     = property_boolean_get(self.active_obj, 'excluded')
+				enable_proxy = property_boolean_get(self.active_obj, 'enable_proxy')
+
+				if (not excluded and enable_proxy):
+					self.draw_text(self.color_text, 'Proxy use only the first material assigned to the object', 130, 2, 6)
+					self.line_feed()
+
+		self.draw_toggle('All double sided', 130, 'all_double_sided',
+			help = 'Enable all double sided faces')
+
+		self.draw_toggle('Dupli verts', 130, 'enable_dupli_verts',
+			help = 'Enable Dupli verts')
+
+		self.draw_toggle('Vextex color', 130, 'enable_vextex_color',
+			help = 'Enable vextex color')
+
+		self.draw_toggle('Halos', 130, 'enable_halos',
+			help = 'Enable halos (points)')
+
+		self.line_feed()
+
+		self.draw_button('Refresh object', 130,
+			self.cb_refresh_active_object, 'Refresh active object')
+
+		if (not obj_ok):
+
+			self.draw_text(self.color_text, 'No geometry selected', 50, 2, 6)
+		else:
+			excluded = property_boolean_get(self.active_obj, 'excluded')
+
+			self.draw_text(self.color_text, 'Geometry: "%s"%s' %
+				(self.active_obj.name, (' (excluded)' if excluded else '')), 50, 2, 6)
+
+			if (not excluded):
+
+				catmull_clark  = property_boolean_get(self.active_obj, 'catmull_clark')
+				raster_width   = property_boolean_get(self.active_obj, 'raster_width')
+				bake_diffuse   = property_boolean_get(self.active_obj, 'bake_diffuse')
+				indirect_light = property_boolean_get(self.active_obj, 'indirect_light', True)
+
+				self.line_feed()
+
+				persistents['_geo_catmull_clark'] = Blender.Draw.Create(catmull_clark)
+				self.id_geo_catmull_clark = self.draw_toggle('Catmull Clark', 130, '_geo_catmull_clark',
+					help = 'Enable catmull-clark property')
+				
+				if (persistents['enable_halos'].val):
+					
+					persistents['_geo_raster_width'] = Blender.Draw.Create(raster_width)
+					self.id_geo_raster_width = self.draw_toggle('Halo raster width', 130, '_geo_raster_width',
+						help = 'Enable raster width (diameter of the point)')
+
+				if (persistents['enable_bake_diffuse'].val):
+
+					persistents['_geo_bake_diffuse'] = Blender.Draw.Create(bake_diffuse)
+					self.id_geo_bake_diffuse = self.draw_toggle('Bake diffuse', 130, '_geo_bake_diffuse',
+						help = 'Enable bake diffuse property')
+
+				if (persistents['enable_indirect_light'].val):
+
+					persistents['_geo_indirect_light'] = Blender.Draw.Create(indirect_light)
+					self.id_geo_indirect_light = self.draw_toggle('Enable indirect', 130, '_geo_indirect_light',
+						help = 'Enable indirect light')
+
+				if (persistents['enable_motion_blur'].val):
+
+					motionblur_transformation = property_boolean_get(self.active_obj, 'motionblur_transformation', True)
+					motionblur_deformation    = property_boolean_get(self.active_obj, 'motionblur_deformation')
+
+					self.line_feed()
+
+					persistents['_geo_mb_transformation'] = Blender.Draw.Create(motionblur_transformation)
+					self.id_geo_mb_transformation = self.draw_toggle('Motion blur transformation', 160, '_geo_mb_transformation',
 						help = 'Enable motion blur transformation')
 
-					self.id_enable_obj_mb_deformation = self.draw_toggle('Motion blur deformation', 160, '_enable_obj_mb_deformation',
+					persistents['_geo_mb_deformation'] = Blender.Draw.Create(motionblur_deformation)
+					self.id_geo_mb_deformation = self.draw_toggle('Motion blur deformation', 160, '_geo_mb_deformation',
 						help = 'Enable motion blur deformation')
 
 				self.line_feed()
 
-				self.id_enable_obj_enable_proxy = self.draw_toggle('Enable proxy', 130, '_enable_obj_enable_proxy',
+				persistents['_geo_enable_proxy'] = Blender.Draw.Create(enable_proxy)
+				self.id_geo_enable_proxy = self.draw_toggle('Enable proxy', 130, '_geo_enable_proxy',
 					help = 'Enable proxy file')
 
-				if (persistents['_enable_obj_enable_proxy'].val):
+				if (enable_proxy):
+
+					proxy_file = property_string_get(self.active_obj, 'proxy_file')
+
+					persistents['_geo_proxy_file'] = Blender.Draw.Create(proxy_file)
+
 					self.draw_button('Proxy file:', 100, self.cb_proxy_filename,
 						'Select proxy file', 0)
 
-					self.id_enable_obj_proxy_file = self.draw_string('', 410, 200, '_enable_obj_proxy_file',
-						help = 'Error log file')
+					self.id_geo_proxy_file = self.draw_string('', 410, 200, '_geo_proxy_file',
+						help = 'Proxy file')
 
 	def panel_textures(self):
 		global persistents
@@ -4206,10 +4587,26 @@ class cfggui(object):
 			help = 'Automatically generate mipmap')
 
 		self.draw_toggle('Texture TX', 100, 'enable_textures_tx',
-			help = 'Change the textures extensions to .tx')
+			help = 'Change the textures extension to .tx')
 
 		self.draw_toggle('Auto unpack', 100, 'enable_autounpack',
 			help = 'Unpack and write temporary image texture')
+
+		self.line_feed()
+
+		self.draw_toggle('Enable UV map', 100, 'enable_uv',
+			help = 'Enable UV mapping')
+
+		if (persistents['enable_uv'].val):
+
+			self.draw_toggle('UV flip U', 100, 'flip_u',
+				help = 'Enable UV flip U')
+
+			self.draw_toggle('UV flip V', 100, 'flip_v',
+				help = 'Enable UV flip V')
+
+			self.draw_toggle('UV layers', 100, 'enable_uvlayes',
+				help = 'Enable export UV layers')
 
 		self.line_feed()
 
@@ -4265,17 +4662,32 @@ class cfggui(object):
 
 			self.line_feed()
 
-			self.draw_button('Refresh lamp', 100,
-				self.cb_refresh_active_lamp, 'Refresh active lamp')
+			self.draw_button('Refresh object', 100,
+				self.cb_refresh_active_object, 'Refresh active object')
 
-			if (self.active_lamp):
-				self.draw_text(self.color_text, 'Lamp: "%s"' % self.active_lamp.name, 100, 2, 6)
+			obj_ok = (self.active_obj and (self.active_obj.type == 'Lamp'))
 
-				self.id_enable_lamp_exclude = self.draw_toggle('Exclude', 100, '_enable_lamp_exclude',
-					help = 'Exclude lamp exports')
+			if (not obj_ok):
 
-				self.id_enable_lamp_photon_map = self.draw_toggle('Photon map', 100, '_enable_lamp_photon_map',
-					help = 'Enable photon map property')
+				self.draw_text(self.color_text, 'No lamp selected', 50, 2, 6)
+			else:
+
+				excluded = property_boolean_get(self.active_obj, 'excluded')
+
+				self.draw_text(self.color_text, 'Lamp: "%s"%s' %
+					(self.active_obj.name, (' (excluded)' if excluded else '')), 50, 2, 6)
+
+				if (not excluded):
+
+					if (persistents['enable_caustics'].val):
+
+						self.line_feed()
+
+						photon_map = property_boolean_get(self.active_obj, 'photon_map')
+
+						persistents['_lamp_photon_map'] = Blender.Draw.Create(photon_map)
+						self.id_lamp_photon_map = self.draw_toggle('Photon map', 100, '_lamp_photon_map',
+							help = 'Enable photon map property')
 
 			if (self.menu_light):
 
@@ -4389,10 +4801,12 @@ class cfggui(object):
 			self.draw_text(self.color_text, 'Col -> C | A -> opacity', 130, 2, 6)
 			self.line_feed()
 
-		self.draw_toggle('Enable', 100, 'enable_shaders',
+		self.draw_toggle('Enable', 130, 'enable_shaders',
 			help = 'Enable all shaders')
 
 		if (persistents['enable_shaders'].val):
+
+			mat_script = False
 
 			self.draw_number('Shading quality: ', 160, 0.0, 16.0, 'shadingquality',
 				help = 'Shading quality')
@@ -4402,7 +4816,7 @@ class cfggui(object):
 
 			self.line_feed()
 
-			self.draw_toggle('Enable debug', 100, '_enable_debug_shaders',
+			self.draw_toggle('Enable debug', 130, '_enable_debug_shaders',
 				help = 'Enable debug shaders')
 
 			if (persistents['_enable_debug_shaders'].val):
@@ -4421,42 +4835,129 @@ class cfggui(object):
 					# get all materials
 
 					materials = Blender.Material.Get()
-					if (materials):
+
+					if (not materials):
+
+						self.active_mat = None
+
+					else:
+
 						self.menu_material = self.bake_menu('Materials',
 							[[m.name, m.name] for m in sorted(materials)])
 
-						self.draw_menu(self.menu_material, 100, '_select_material',
-							help = 'Select material')
-
 						material_name = self.menu_material.convert(persistents['_select_material'].val)
-						if (materials_assign[1].has_key(material_name)):
 
-							m = materials_assign[1][material_name]
+						self.active_mat = Blender.Material.Get(material_name)
 
-							self.draw_button('Remove', 100,
-								self.cb_remove_material, 'Remove assign')
+						if (self.active_mat and persistents['enable_scripts'].val):
 
-							if (persistents['enable_bake_diffuse'].val):
+							l = 130
 
-								self.line_feed()
-								y = m.gui_sss(self.x, self.y, self.h, self.s)
+							texts = Blender.Text.Get()
+
+							# postscript
 
 							self.line_feed()
 
-							y = m.gui(self.x, self.y, self.h, self.s)
+							enable_postscript = property_boolean_get(self.active_mat, 'enable_postscript')
+							persistents['_mat_enable_postscript'] = Blender.Draw.Create(enable_postscript)
+							self.id_mat_enable_postscript = self.draw_toggle('Shader post-script', 130, '_mat_enable_postscript',
+								help = 'Enable shader post-script')
 
-							self.blank(self.spd)
+							if (enable_postscript):
 
-							self.draw_button('Default', 100,
-								self.cb_material_default, 'Default values')
+								script = property_string_get(self.active_mat, 'postscript')
 
-							self.y = y
-						else:
-							self.draw_button('Assign', 100,
-								self.cb_assign_material, 'Assign material')
+								if (script):
+									self.draw_text(self.color_text, script, l, 2, 6)
+								elif (texts):
+									self.menu_postscript = self.bake_menu('Load post-script from text',
+										[[t.name, t.name] for t in texts])
 
-							self.draw_menu(self.menu_surface, 100, '_select_surface',
-								self.cb_menu_surface, 'Select shader')
+									self.draw_menu(self.menu_postscript, l, '_select_postscript',
+										self.cb_menu_mat_postscript, 'Select shader post-script')
+
+							# script
+
+							self.line_feed()
+
+							enable_script = property_boolean_get(self.active_mat, 'enable_script')
+							persistents['_mat_enable_script'] = Blender.Draw.Create(enable_script)
+							self.id_mat_enable_script = self.draw_toggle('Shader script', 130, '_mat_enable_script',
+								help = 'Enable shader script')
+
+							if (enable_script):
+
+								script = property_string_get(self.active_mat, 'script')
+
+								if (script):
+									mat_script = True
+									self.draw_text(self.color_text, script, l, 2, 6)
+								elif (texts):
+									self.menu_script = self.bake_menu('Load script from text',
+										[[t.name, t.name] for t in texts])
+
+									self.draw_menu(self.menu_script, l, '_select_script',
+										self.cb_menu_mat_script, 'Select shader script')
+
+							# prescript
+
+							self.line_feed()
+
+							enable_prescript = property_boolean_get(self.active_mat, 'enable_prescript')
+							persistents['_mat_enable_prescript'] = Blender.Draw.Create(enable_prescript)
+							self.id_mat_enable_prescript = self.draw_toggle('Shader pre-script', 130, '_mat_enable_prescript',
+								help = 'Enable shader post-script')
+
+							if (enable_prescript):
+
+								script = property_string_get(self.active_mat, 'prescript')
+
+								if (script):
+									self.draw_text(self.color_text, script, l, 2, 6)
+								elif (texts):
+									self.menu_prescript = self.bake_menu('Load pre-script from text',
+										[[t.name, t.name] for t in texts])
+
+									self.draw_menu(self.menu_prescript, l, '_select_prescript',
+										self.cb_menu_mat_prescript, 'Select shader pre-script')
+
+
+						self.line_feed()
+
+						self.draw_menu(self.menu_material, 130, '_select_material',
+							help = 'Select material')
+
+						if (not mat_script):
+
+							if (materials_assign[1].has_key(material_name)):
+
+								m = materials_assign[1][material_name]
+
+								self.draw_button('Remove', 130,
+									self.cb_remove_material, 'Remove assign')
+
+								if (persistents['enable_bake_diffuse'].val):
+
+									self.line_feed()
+									y = m.gui_sss(self.x, self.y, self.h, self.s)
+
+								self.line_feed()
+
+								y = m.gui(self.x, self.y, self.h, self.s)
+
+								self.blank(self.spd)
+
+								self.draw_button('Default', 130,
+									self.cb_material_default, 'Default values')
+
+								self.y = y
+							else:
+								self.draw_button('Assign', 130,
+									self.cb_assign_material, 'Assign material')
+
+								self.draw_menu(self.menu_surface, 130, '_select_surface',
+									self.cb_menu_surface, 'Select shader')
 
 	def panel_dof(self):
 		global persistents
@@ -4487,6 +4988,53 @@ class cfggui(object):
 		if (persistents['units_length'].val):
 			self.draw_string('Length scale: ', 140, 20, 'units_lengthscale',
 				help = 'Length unit scale of "common" space units')
+
+		if (persistents['enable_scripts'].val):
+
+			l = 130
+
+			texts = Blender.Text.Get()
+
+			self.line_feed()
+
+			self.id_enable_world_postscript = self.draw_toggle('World post-script', 130, 'enable_world_postscript',
+				help = 'Enable world post-script')
+
+			if (persistents['enable_world_postscript'].val):
+
+				script = persistents['world_postscript'].val
+
+				if (script):
+
+					self.draw_text(self.color_text, script, l, 2, 6)
+
+				elif (texts):
+					self.menu_postscript = self.bake_menu('Load post-script from text',
+						[[t.name, t.name] for t in texts])
+
+					self.draw_menu(self.menu_postscript, l, '_select_postscript',
+						self.cb_menu_world_postscript, 'Select post-script')
+
+			self.line_feed()
+
+			self.id_enable_header_prescript = self.draw_toggle('World pre-script', 130, 'enable_world_prescript',
+				help = 'Enable world pre-script')
+
+			if (persistents['enable_world_prescript'].val):
+
+				script = persistents['world_prescript'].val
+
+				if (script):
+
+					self.draw_text(self.color_text, script, l, 2, 6)
+
+				elif (texts):
+					self.menu_prescript = self.bake_menu('Load pre-script from text',
+						[[t.name, t.name] for t in texts])
+
+					self.draw_menu(self.menu_prescript, l, '_select_prescript',
+						self.cb_menu_world_prescript, 'Select pre-script')
+
 
 	def panel_ambient_occlusion(self):
 		global persistents, materials_assign
@@ -4594,25 +5142,54 @@ class cfggui(object):
 	def panel_scripts(self):
 		global persistents
 
-		self.draw_toggle('Script header', 100, 'enable_script_header',
-			help = 'Enable script header')
+		self.draw_toggle('Enable', 130, 'enable_scripts',
+			help = 'Enable scripts')
 
-		if (persistents['enable_script_header'].val):
-			l = 100
-			script = persistents['script_header'].val
-			if (script):
-				self.draw_button('Remove', 100,
-					self.cb_script_start_remove, 'Remove script header')
+		if (persistents['enable_scripts'].val):
 
-				self.draw_text(self.color_text, script, l, 2, 6)
-			else:
-				texts = Blender.Text.Get()
-				if (texts):
-					self.menu_text = self.bake_menu('Load script from text',
+			l = 130
+
+			texts = Blender.Text.Get()
+
+			self.line_feed()
+
+			self.id_enable_header_postscript = self.draw_toggle('Header post-script', 130, 'enable_header_postscript',
+				help = 'Enable header post-script')
+
+			if (persistents['enable_header_postscript'].val):
+
+				script = persistents['header_postscript'].val
+
+				if (script):
+
+					self.draw_text(self.color_text, script, l, 2, 6)
+
+				elif (texts):
+					self.menu_postscript = self.bake_menu('Load post-script from text',
 						[[t.name, t.name] for t in texts])
 
-					self.draw_menu(self.menu_text, l, '_select_script_header',
-						self.cb_menu_text, 'Select script header')
+					self.draw_menu(self.menu_postscript, l, '_select_postscript',
+						self.cb_menu_header_postscript, 'Select post-script')
+
+			self.line_feed()
+
+			self.id_enable_header_prescript = self.draw_toggle('Header pre-script', 130, 'enable_header_prescript',
+				help = 'Enable header pre-script')
+
+			if (persistents['enable_header_prescript'].val):
+
+				script = persistents['header_prescript'].val
+
+				if (script):
+
+					self.draw_text(self.color_text, script, l, 2, 6)
+
+				elif (texts):
+					self.menu_prescript = self.bake_menu('Load pre-script from text',
+						[[t.name, t.name] for t in texts])
+
+					self.draw_menu(self.menu_prescript, l, '_select_prescript',
+						self.cb_menu_header_prescript, 'Select pre-script')
 
 	def panel_stereo(self):
 		global persistents
@@ -4692,6 +5269,12 @@ def property_boolean_get(obj, name, default = False):
 	except:
 		return default
 
+def property_string_get(obj, name, default = ''):
+	try:
+		return property_get(obj, name)
+	except:
+		return default
+
 def selected_object(types = []):
 	selected = Blender.Object.GetSelected()
 	if (selected):
@@ -4723,14 +5306,19 @@ def default_values():
 		'enable_binary':		Blender.Draw.Create(0),
 		'enable_split':			Blender.Draw.Create(0),
 		'enable_anim':			Blender.Draw.Create(0),
-		'enable_relative_paths':	Blender.Draw.Create(0),
+		'enable_relative_paths':	Blender.Draw.Create(1),
 
 		'enable_auto_threads':		Blender.Draw.Create(1),
 		'limits_threads':		Blender.Draw.Create(1),
 
-		'enable_script_header':		Blender.Draw.Create(0),
-		'script_header':		Blender.Draw.Create(''),
-		'_select_script_header':	Blender.Draw.Create(0),
+		'enable_scripts':		Blender.Draw.Create(1),
+		'enable_header_postscript':	Blender.Draw.Create(0),
+		'header_postscript':		Blender.Draw.Create(''),
+		'enable_header_prescript':	Blender.Draw.Create(0),
+		'header_prescript':		Blender.Draw.Create(''),
+		'_select_script':		Blender.Draw.Create(0),
+		'_select_postscript':		Blender.Draw.Create(0),
+		'_select_prescript':		Blender.Draw.Create(0),
 
 		'bucketorder':			Blender.Draw.Create(2),		# Spiral
 		'bucketsize_x':			Blender.Draw.Create(32),
@@ -4772,7 +5360,9 @@ def default_values():
 		'quantize_max':			Blender.Draw.Create('255'),
 
 		'all_double_sided':		Blender.Draw.Create(0),
-		'dup_verts':			Blender.Draw.Create(1),
+		'enable_dupli_verts':		Blender.Draw.Create(1),
+		'enable_vextex_color':		Blender.Draw.Create(1),
+		'enable_halos':			Blender.Draw.Create(1),
 
 		'enable_ray_traced':		Blender.Draw.Create(0),
 		'ray_traced_max_depth':		Blender.Draw.Create(1),
@@ -4812,6 +5402,10 @@ def default_values():
 		'enable_automipmap':		Blender.Draw.Create(1),
 		'enable_autounpack':		Blender.Draw.Create(0),
 		'enable_textures_tx':		Blender.Draw.Create(0),
+		'enable_uvlayes':		Blender.Draw.Create(0),
+		'enable_uv':			Blender.Draw.Create(1),
+		'flip_u':			Blender.Draw.Create(0),
+		'flip_v':			Blender.Draw.Create(1),
 
 		'enable_dof':			Blender.Draw.Create(0),
 		'fstop':			Blender.Draw.Create('4.0'),
@@ -4821,6 +5415,10 @@ def default_values():
 		'enable_sky':			Blender.Draw.Create(1),
 		'units_length':			Blender.Draw.Create(0),		# none
 		'units_lengthscale':		Blender.Draw.Create('1.0'),
+		'enable_world_postscript':	Blender.Draw.Create(0),
+		'world_postscript':		Blender.Draw.Create(''),
+		'enable_world_prescript':	Blender.Draw.Create(0),
+		'world_prescript':		Blender.Draw.Create(''),
 
 		'limits_texturememory':		Blender.Draw.Create('20480'),
 		'limits_texturefiles':		Blender.Draw.Create(texturefiles),
@@ -4854,22 +5452,30 @@ def default_values():
 		'enable_rerender':		Blender.Draw.Create(0),
 		'rerender_memory':		Blender.Draw.Create(''),
 
-		'_enable_obj_exclude':		Blender.Draw.Create(0),
-		'_enable_obj_catmull_clark':	Blender.Draw.Create(0),
-		'_enable_obj_bake_diffuse':	Blender.Draw.Create(0),
-		'_enable_obj_disable_indirect':	Blender.Draw.Create(0),
-		'_enable_obj_mb_transformation':Blender.Draw.Create(0),
-		'_enable_obj_mb_deformation':	Blender.Draw.Create(0),
-		'_enable_obj_enable_proxy':	Blender.Draw.Create(0),
-		'_enable_obj_proxy_file':	Blender.Draw.Create(''),
+		'_obj_excluded':		Blender.Draw.Create(0),
+		'_obj_enable_postscript':	Blender.Draw.Create(0),
+		'_obj_enable_prescript':	Blender.Draw.Create(0),
 
-		'_enable_lamp_exclude':		Blender.Draw.Create(0),
-		'_enable_lamp_photon_map':	Blender.Draw.Create(0),
+		'_geo_catmull_clark':		Blender.Draw.Create(0),
+		'_geo_raster_width':		Blender.Draw.Create(0),
+		'_geo_bake_diffuse':		Blender.Draw.Create(0),
+		'_geo_indirect_light':		Blender.Draw.Create(0),
+		'_geo_mb_transformation':	Blender.Draw.Create(0),
+		'_geo_mb_deformation':		Blender.Draw.Create(0),
+		'_geo_enable_proxy':		Blender.Draw.Create(0),
+		'_geo_proxy_file':		Blender.Draw.Create(''),
+
+		'_lamp_photon_map':		Blender.Draw.Create(0),
+
+		'_mat_enable_script':		Blender.Draw.Create(0),
+		'_mat_enable_postscript':	Blender.Draw.Create(0),
+		'_mat_enable_prescript':	Blender.Draw.Create(0),
 
 		'_panel_output':		Blender.Draw.Create(1),
 		'_panel_images':		Blender.Draw.Create(0),
 		'_panel_pass':			Blender.Draw.Create(0),
 		'_panel_ambient_occlusion':	Blender.Draw.Create(0),
+		'_panel_objects':		Blender.Draw.Create(0),
 		'_panel_geometries':		Blender.Draw.Create(0),
 		'_panel_lights':		Blender.Draw.Create(0),
 		'_panel_shadows':		Blender.Draw.Create(0),
@@ -4903,17 +5509,18 @@ def default_values():
 def output_filename_xml():
 	global persistents
 
+	base = ''
+
 	try:
-		(directory, file) = os.path.split(persistents['filename'].val)
-		(base, ext) = os.path.splitext(file)
+		(directory, filename) = os.path.split(persistents['filename'].val)
+		(base, ext) = os.path.splitext(filename)
 	except:
+		pass
+
+	if (not base):
 		base = 'gelato'
 
 	return	fix_file_name(base + '.xml')
-
-def output_name_xml():
-	(directory, filename) = os.path.split(output_filename_xml())
-	return filename
 
 def config_save():
 	global ROOT_ELEMENT, USE_XML_DOM_EXT
@@ -4932,6 +5539,7 @@ def config_save():
 
 	root.setAttribute('version', __version__)
 	root.setAttribute('timestamp', datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S'))
+	root.setAttribute('scene', Blender.Scene.GetCurrent().name)
 
 	try:
 		root.setAttribute('user', getpass.getuser())
@@ -5016,7 +5624,7 @@ def config_save():
 
 	if (persistents['$pack_config'].val):
 
-		name_xml = output_name_xml()
+		name_xml = output_filename_xml()
 
 		# delete text file
 
@@ -5069,7 +5677,7 @@ def config_load():
 
 	sc = Blender.Scene.GetCurrent()
 
-	for name in persistents.keys():
+	for name in persistents.iterkeys():
 
 		# load property
 		if (name[0] == '$'):
@@ -5093,7 +5701,7 @@ def config_load():
 
 		# read pack xml file
 
-		name_xml = output_name_xml()
+		name_xml = output_filename_xml()
 
 		try:
 			text = Blender.Text.Get(name_xml)
@@ -5122,7 +5730,7 @@ def config_load():
 	if (len(head) == 0):
 		print 'Error: file "%s", not element "config"' % filename_xml
 	else:
-		for name in persistents.keys():
+		for name in persistents.iterkeys():
 
 			# skip internal's names
 			if (name[0] in ['_', '$']):
@@ -5249,10 +5857,6 @@ def clamp(v, vmin, vmax):
 	if (v > vmax):
 		return vmax
 	return v
-
-def escape_quote(name):
-	# replace '"' to '\"'
-	return name.replace('"', '\\"')
 
 def space2underscore(name):
 	# replace spaces to '_'
@@ -5386,7 +5990,17 @@ def main():
 
 	gelato_gui = cfggui()
 
-	# load and save config
+	# rename old config file
+			
+	filename = output_filename_xml()
+	filename_old = filename + '.old'
+			
+	try:
+		shutil.copyfile(filename, filename_old)
+	except:
+		sys.excepthook(*sys.exc_info())
+
+	# load and save config file
 
 	config_load()
 	config_save()
