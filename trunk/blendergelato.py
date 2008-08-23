@@ -9,7 +9,7 @@ Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18n'
+__version__ = '0.18p'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -110,6 +110,9 @@ class OpenTempRename(object):
 
 	def __del__(self):
 		try:
+			if (not hasattr(self, 'fd')):
+				return
+
 			self.fd.close()
 
 			filename_bak = self.filename + ('.bak' if WINDOWS else '~')
@@ -1969,7 +1972,7 @@ class Gelato_pyg(object):
 		# check if shader light assign
 
 		sd = gelato_gui.assigned_light[1].get(lname)
-		if ((sd is not None) and (sd.widget_enable_shadow.val)):
+		if ((sd is not None) and sd.enable_shadow):
 			self.write_camera_light(obj, lamp, name, mat)
 			return
 
