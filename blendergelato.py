@@ -3,13 +3,13 @@
 
 """
 Name: 'Blender Gelato'
-Blender: 246
+Blender: 247
 Group: 'Render'
 Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18p'
+__version__ = '0.18'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -18,7 +18,7 @@ Blender(TM) to NVIDIA Gelato(TM) scene converter
 # NVIDIA Gelato(TM) Exporter
 #
 # Original By: Mario Ambrogetti
-# Date:        Sat, 23 Aug 2008 09:56:48 +0200
+# Date:        Wed, 03 Sep 2008 14:52:40 +0200
 #
 # ***** BEGIN GPL LICENSE BLOCK *****
 #
@@ -537,13 +537,11 @@ class GUI_Menu(GUI_Value):
 
 		self.menu = ''.join(slist)
 
-		if (not globals().has_key(self._global_name)):
-			self.setdefault()
-
 	def __init__(self, group_name, name, width, title = None, options = None, **kwargs):
 
 		self.width = width
 		self.__make_menu(title, options)
+		self.setdefault()
 
 	@apply
 	def val():
@@ -1043,7 +1041,7 @@ class Shader(object):
 		shfile =  os.path.join(directory, filename)
 
 		if (not os.path.exists(shfile)):
-			fd = search_file(filename, self.gui_path_shader.val)
+			fd = search_file(filename, gelato_gui.gui_path_shader.val)
 			if (fd):
 				shfile = fd
 
@@ -1158,7 +1156,9 @@ class Gelato_pyg(object):
 		self.EXT_DIFFUSE   = '.sdb'
 		self.EXT_PHOTONMAP = '.sdb'
 
-		self.ZERO = ctypes.c_float(0.0)
+		self._SQRT2 = math.sqrt(2)
+		self._ZERO  = ctypes.c_float(0.0)
+		self._ZERO3 = [0.0, 0.0, 0.0]
 
 		self.passes = EnumType('beauty', 'shadows', 'ambient_occlusion', 'photon_map', 'bake_diffuse')
 
@@ -1167,11 +1167,11 @@ class Gelato_pyg(object):
 		# binary header
 
 		if (sys.byteorder == 'little'):
-			self.BINARY_INT   = 0200
-			self.BINARY_FLOAT = 0202
+			self._BINARY_INT   = 0200
+			self._BINARY_FLOAT = 0202
 		else:
-			self.BINARY_INT   = 0201
-			self.BINARY_FLOAT = 0203
+			self._BINARY_INT   = 0201
+			self._BINARY_FLOAT = 0203
 
 		# FIXME
 		self.convert_extend = dict([
@@ -1240,13 +1240,13 @@ class Gelato_pyg(object):
 		return self.generate_instance_name(name, prefix = '__photon_map_', ext = '__', noframe = True)
 
 	def file_shadow_name(self, name):
-		return self.generate_instance_name(space2underscore(name), self.EXT_SHADOWMAP, self.base + '_shadow_')
+		return self.generate_instance_name(sanefilename(name), self.EXT_SHADOWMAP, self.base + '_shadow_')
 
 	def file_diffuse_name(self, name):
-		return self.generate_instance_name(space2underscore(name), self.EXT_DIFFUSE, self.base + '_diffuse_')
+		return self.generate_instance_name(sanefilename(name), self.EXT_DIFFUSE, self.base + '_diffuse_')
 
 	def file_object_name(self, name, material_index, material_max, mbur_index, mbux_max):
-		return self.generate_split_name(space2underscore(name), 'object', material_index, material_max, mbur_index, mbux_max)
+		return self.generate_split_name(sanefilename(name), 'object', material_index, material_max, mbur_index, mbux_max)
 
 	def file_output_pass(self):
 		if (self.npasses <= 1):
@@ -1397,7 +1397,7 @@ class Gelato_pyg(object):
 
 			if (ty is int):
 
-				wfile.write(ctypes.c_ubyte(self.BINARY_INT))
+				wfile.write(ctypes.c_ubyte(self._BINARY_INT))
 				wfile.write(ctypes.c_uint(l))
 
 				for i in array:
@@ -1405,14 +1405,14 @@ class Gelato_pyg(object):
 
 			elif (ty is float):
 
-				wfile.write(ctypes.c_ubyte(self.BINARY_FLOAT))
+				wfile.write(ctypes.c_ubyte(self._BINARY_FLOAT))
 				wfile.write(ctypes.c_uint(l))
 
 				for f in array:
 					try:
 						wfile.write(ctypes.c_float(f))
 					except:
-						wfile.write(self.ZERO)
+						wfile.write(self._ZERO)
 		else:
 			iarray = iter(array)
 
@@ -1483,6 +1483,8 @@ class Gelato_pyg(object):
 			self.file.write('\nAttribute ("string geometryset", "+%s")\n' %
 				shader_ambient_occlusion['occlusionname'])
 
+			shader_ambient_occlusion['occlusionname'] = 'localocclusion'
+
 			self.file.write(str(shader_ambient_occlusion))
 		else:
 			self.file.write('\nAttribute ("string geometryset", "+localocclusion")\n')
@@ -1502,7 +1504,7 @@ class Gelato_pyg(object):
 
 			shader_ambient_occlusion = gelato_gui.assigned_material[0].get('ambient_occlusion')
 			if (shader_ambient_occlusion is not None):
-				shader_environment_light['occlusionname'] = shader_ambient_occlusion['occlusionname']
+				shader_environment_light['occlusionname'] = 'localocclusion'
 
 			self.file.write(str(shader_environment_light))
 		else:
@@ -1868,7 +1870,7 @@ class Gelato_pyg(object):
 			cname,
 			lamp.bufferSize, lamp.bufferSize,
 			lamp.samples, lamp.samples,
-			lamp.spotSize,
+			lamp.spotSize * self._SQRT2,
 			lamp.clipStart,
 			lamp.clipEnd))
 
@@ -2055,7 +2057,6 @@ class Gelato_pyg(object):
 					if (self.verbose > 1):
 						print 'Info: excluded lamp "%s"' % name
 			else:
-
 				# shader light
 
 				sd = copy.deepcopy(lsd)
@@ -2280,26 +2281,32 @@ class Gelato_pyg(object):
 			if (enable_shadergroup):
 				self.file.write('ShaderGroupEnd ()\n')
 
-		# texture displacement
-
 		if (self.enable_displacements):
 
-			esg = len(textures_displacement) > 1
+			sd = gelato_gui.assigned_displacement[1].get(mat_name)
+			if (sd is None):
 
-			if (esg):
-				self.file.write('ShaderGroupBegin ()\n')
+				# texture displacement
 
-			for ftex in textures_displacement:
-				if (self.verbose > 0):
-					self.file.write('## Texture displacement: "%s"\n' % ftex.name)
+				esg = len(textures_displacement) > 1
 
-				self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.filename))
-				self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
-				self.file.write('Parameter ("float Km", %s)\n' %  round(ftex.disp, self.PRECISION))
-				self.file.write('Shader ("displacement", "dispmap")\n')
+				if (esg):
+					self.file.write('ShaderGroupBegin ()\n')
 
-			if (esg):
-				self.file.write('ShaderGroupEnd ()\n')
+				for ftex in textures_displacement:
+					if (self.verbose > 0):
+						self.file.write('## Texture displacement: "%s"\n' % ftex.name)
+
+					self.file.write('Parameter ("string texturename", "%s")\n' % fix_file_name(ftex.filename))
+					self.file.write('Parameter ("string wrap", "%s")\n' % self.convert_extend[ftex.extend])
+					self.file.write('Parameter ("float Km", %s)\n' %  round(ftex.disp, self.PRECISION))
+					self.file.write('Shader ("displacement", "dispmap")\n')
+
+				if (esg):
+					self.file.write('ShaderGroupEnd ()\n')
+
+			else:
+				self.file.write(str(sd))
 
 		# photon map
 
@@ -2581,7 +2588,7 @@ class Gelato_pyg(object):
 					try:
 						dmesh.vertexcolors.extend([c[0]/255.0, c[1]/255.0, c[2]/255.0])
 					except:
-						dmesh.vertexcolors.extend([0.0, 0.0, 0.0])
+						dmesh.vertexcolors.extend(self._ZERO3)
 
 			# UV layers
 
@@ -2692,6 +2699,7 @@ class Gelato_pyg(object):
 						mat = meshes[0].materials[mat_index]
 				except:
 					if (self.verbose > 1):
+						print 'Error: mesh "%s" lost material' % name
 						sys.excepthook(*sys.exc_info())
 
 				if (mat is not None):
@@ -2792,6 +2800,7 @@ class Gelato_pyg(object):
 							(npoint, width, mat.haloSize))
 
 						self.write_array(wfile, points, ',"vertex point P",')
+
 					else:
 						wfile.write('Mesh ("%s"' % interpolation)
 
@@ -3213,7 +3222,7 @@ class Gelato_pyg(object):
 
 		self.current_pass   = current_pass
 		self.pass_name      = pass_name
-		self.pass_name_file = space2underscore(self.pass_name.lower())
+		self.pass_name_file = sanefilename(self.pass_name.lower())
 
 		# open file pyg
 
@@ -3539,17 +3548,16 @@ class GUI_Config(object):
 		self.active_obj = None
 		self.active_mat = None
 
-		self.shader_debug   = None
-		self.shader_surface = None
-		self.shader_light   = None
+		self.shader_debug = None
 
-		self.list_shaders_debug   = []
-		self.list_shaders_surface = []
-		self.list_shaders_light   = []
+		self.list_shaders_debug        = []
+		self.list_shaders_surface      = []
+		self.list_shaders_displacement = []
+		self.list_shaders_light        = []
 
 		self.assigned_material     = [{}, {}]
+		self.assigned_displacement = [{}, {}]
 		self.assigned_light        = [{}, {}]
-		self.assigned_displacement = [{}, {}]	# TODO
 
 		# widget color
 
@@ -3621,15 +3629,22 @@ class GUI_Config(object):
 
 		self.config_filename = base + '.xml'
 
+		GUI_Base.home()
+
+	def post_init(self):
+
+		assigned_material_internal = self.assigned_material[0]
+		assigned_light_internal    = self.assigned_light[0]
+
 		# avanable shaders
 
-		self.assigned_material[0]['ambient_occlusion'] = None
-		self.assigned_material[0]['shoot_photons']     = None
-		self.assigned_material[0]['bake_diffuse']      = None
+		assigned_material_internal['ambient_occlusion'] = None
+		assigned_material_internal['shoot_photons']     = None
+		assigned_material_internal['bake_diffuse']      = None
 
-		self.assigned_light[0]['shoot_photons']  = None
-		self.assigned_light[0]['indirect_light'] = None
-		self.assigned_light[0]['caustic_light']  = None
+		assigned_light_internal['shoot_photons']  = None
+		assigned_light_internal['indirect_light'] = None
+		assigned_light_internal['caustic_light']  = None
 
 		available_shaders = find_files('*.gso', self.gui_path_shader.val)
 		if (available_shaders):
@@ -3648,69 +3663,67 @@ class GUI_Config(object):
 					# surface, generic
 
 					if (ty in [Sbase.types.surface, Sbase.types.generic]):
-						self.list_shaders_surface.append([base, sd])
+
+						self.list_shaders_surface.append([base, copy.deepcopy(sd)])
 
 						# shaders debug
 
 						if (base in ['shownormals', 'showfacing', 'showst', 'showuv', 'showdudv', 'showgrids', 'raygoggles']):
 							self.list_shaders_debug.append([base, copy.deepcopy(sd)])
 
-						if (base == 'ambocclude'):
+						if ((base == 'ambocclude') and (assigned_material_internal.get('ambient_occlusion') is None)):
+							assigned_material_internal['ambient_occlusion'] = copy.deepcopy(sd)
+						elif ((base == 'shootphotons') and (assigned_material_internal.get('shoot_photons') is None)):
+							assigned_material_internal['shoot_photons'] = copy.deepcopy(sd)
+						elif ((base == 'bakediffuse') and (assigned_material_internal.get('bake_diffuse') is None)):
+							assigned_material_internal['bake_diffuse'] = copy.deepcopy(sd)
 
-							ambocclude = copy.deepcopy(sd)
+					# displacement
 
-							ambocclude['occlusionname'] = 'localocclusion'
+					elif (ty is Sbase.types.displacement):
 
-							self.assigned_material[0]['ambient_occlusion'] = ambocclude
-
-						elif (base == 'shootphotons'):
-
-							self.assigned_material[0]['shoot_photons'] = sd
-
-						elif (base == 'bakediffuse'):
-
-							self.assigned_material[0]['bake_diffuse'] = sd
+						self.list_shaders_displacement.append([base, copy.deepcopy(sd)])
 
 					# light
 
 					elif (ty is Sbase.types.light):
-						self.list_shaders_light.append([base, sd])
+
+						self.list_shaders_light.append([base, copy.deepcopy(sd)])
 
 						if (base == 'envlight'):
 
-							envlight = copy.deepcopy(sd)
+							envlight = assigned_light_internal.get('shoot_photons')
+							if (envlight is None):
+								envlight = assigned_light_internal['shoot_photons'] = copy.deepcopy(sd)
 
 							envlight.nameid = '__envlight_pass2__'
 							envlight['occlusionmap'] = '$FILE_PASS1'
 
-							self.assigned_light[0]['shoot_photons'] = envlight
-
 						elif (base == 'indirectlight'):
 
-							indirectlight = copy.deepcopy(sd)
+							indirectlight = assigned_light_internal.get('indirect_light')
+							if (indirectlight is None):
+								indirectlight = assigned_light_internal['indirect_light'] = copy.deepcopy(sd)
 
 							indirectlight.nameid = '__indirectlight__'
 
-							self.assigned_light[0]['indirect_light'] = indirectlight
-
 						elif (base == 'causticlight'):
 
-							causticlight = copy.deepcopy(sd)
+							causticlight = assigned_light_internal.get('caustic_light')
+							if (causticlight is None):
+								causticlight = assigned_light_internal['caustic_light'] = copy.deepcopy(sd)
 
 							causticlight.nameid = '__causticlight__'
-
-							self.assigned_light[0]['caustic_light'] = causticlight
 
 				except:
 					sys.excepthook(*sys.exc_info())
 					print 'Error: shader "%s" not found disabled' % filename
 
-		for data in [self.assigned_material[0], self.assigned_light[0]]:
+		for data in [assigned_material_internal, assigned_light_internal]:
 			for k, d in data.iteritems():
 				if (d is None):
-					print 'Error: shader "%s.gso" not found disabled' % k
+					print 'Error: shader "%s" not found disabled' % k
 
-		GUI_Base.home()
 
 	def draw(self):
 
@@ -3740,10 +3753,9 @@ class GUI_Config(object):
 			elif (self.active_obj):
 				self.active_obj = None
 				Blender.Draw.Draw()
-
 			return
 
-		# only press
+		# only pressed
 
 		if (not val):
 			return
@@ -3852,7 +3864,6 @@ class GUI_Config(object):
 				pid = subprocess.Popen([GELATO, filename]).pid
 
 				print 'Info: run Gelato pid=%s' % pid
-
 			else:
 				raise GelatoError, 'No such file: `%s\'' % filename
 
@@ -4065,7 +4076,7 @@ class GUI_Config(object):
 	def cb_button_mat_assign(self, event, val):
 		material_name = self.gui_menu_material.val
 		sd = self.gui_menu_shader.val
-		if (material_name and sd):
+		if (material_name and (sd is not None)):
 			# copy object no reference
 			self.assigned_material[1][material_name] = copy.deepcopy(sd)
 
@@ -4122,6 +4133,30 @@ class GUI_Config(object):
 		if (mat and script):
 			property_set(mat, 'prescript', script)
 
+	# callback displacement
+
+	def cb_button_disp_assign(self, event, val):
+		material_name = self.gui_menu_material.val
+		sd = self.gui_menu_displacement.val
+		if (material_name and (sd is not None)):
+			# copy object no reference
+			self.assigned_displacement[1][material_name] = copy.deepcopy(sd)
+
+	def cb_menu_displacement(self, event, val):
+		self.cb_button_disp_assign(0, 0)
+
+
+	def cb_button_disp_remove(self, event, val):
+		ret = Blender.Draw.PupMenu('Remove assign ?%t|no%x1|yes%x2')
+		if (ret != 2):
+			return
+
+		try:
+			material_name = self.gui_menu_material.val
+			del self.assigned_displacement[1][material_name]
+		except:
+			sys.excepthook(*sys.exc_info())
+
 	# callback light
 
 	def cb_lamp_photon_map(self, event, val):
@@ -4132,7 +4167,7 @@ class GUI_Config(object):
 	def cb_button_lamp_assign(self, event, val):
 		lamp_name = self.gui_menu_lamp.val
 		sd = self.gui_menu_light.val
-		if (lamp_name and sd):
+		if (lamp_name and (sd is not None)):
 			# copy object no reference
 			self.assigned_light[1][lamp_name] = copy.deepcopy(sd)
 
@@ -4296,6 +4331,8 @@ class GUI_Config(object):
 			base = 'gelato'
 
 		filename = base + '.pyg'
+
+		# paths
 
 		path_inputs    = ':'.join(['.', os.path.join('$GELATOHOME', 'inputs'),   '&'])
 		path_texture   = ':'.join(['.', os.path.join('$GELATOHOME', 'textures'), '&'])
@@ -4555,6 +4592,8 @@ class GUI_Config(object):
 		self.gui_shadow_ray_traced = GUI_Toggle('config', 'shadow_ray_traced', 'Ray traced', 105, default = 0, func = f, help = 'Enable ray traced shadows')
 		self.gui_enable_dynamic    = GUI_Toggle('config', 'enable_dynamic',    'Dynamics',   210, default = 0,           help = 'Enable dynamic shadow')
 
+		self.gui_ray_traced_opaque_shadows = GUI_Toggle('config', 'ray_traced_opaque_shadows', 'Opaque shadows', 100, default = 1, help = 'Enable objects opaque regardless of their shaders')
+
 		self.gui_ray_traced_shadow_bias = GUI_Number('config', 'ray_traced_shadow_bias', 'Shadow bias: ', 150, 0.0, 16.0, default = 0.01, help = 'Ray traced shadow bias')
 
 		self.gui_compression_tiff = GUI_Menu('config', 'compression_shadow', 100,
@@ -4571,6 +4610,7 @@ class GUI_Config(object):
 		self.gui_shadow_ray_traced.draw()
 
 		if (self.gui_shadow_ray_traced.val):
+			self.gui_ray_traced_opaque_shadows.draw()
 			self.gui_ray_traced_shadow_bias.draw()
 
 		if (self.gui_shadow_maps.val or self.gui_shadow_woo.val):
@@ -4686,12 +4726,13 @@ class GUI_Config(object):
 
 	def panel_motion_blur_init(self):
 
-		self.gui_enable_motion_blur = GUI_Toggle('config', 'enable_motion_blur', 'Enable', 100, default = 0, help = 'Enable motion blur')
+		self.gui_enable_motion_blur = GUI_Toggle('config', 'enable_motion_blur', 'Enable',     100, default = 0, help = 'Enable motion blur')
+		self.gui_ray_motion         = GUI_Toggle('config', 'ray_motion',         'Ray motion', 100, default = 0, help = 'Do rays consider motion-blur of objects')
 
 		self.gui_temporal_quality      = GUI_Number('config', 'temporal_quality',      'Quality: ',               100, 1,   256,    default = 16,  help = 'Number of time values for motion blur')
 		self.gui_frames_transformation = GUI_Number('config', 'frames_transformation', 'Frames transformation: ', 180, 2,   9999,   default = 2,   help = 'Number of frames moion blur transformation')
 		self.gui_frames_deformation    = GUI_Number('config', 'frames_deformation',    'Frames deformation: ',    180, 2,   9999,   default = 2,   help = 'Number of frames moion blur deformation')
-		self.gui_dice_motionfactor     = GUI_Number('config', 'dice_motionfactor',     'Motion factor: ',         140, 0.0, 1000.0, default = 1.0, help = 'Scaling for decreased tessellation and shading for moving objects')
+		self.gui_dice_motionfactor     = GUI_Number('config', 'dice_motionfactor',     'Motion factor: ',         180, 0.0, 1000.0, default = 1.0, help = 'Scaling for decreased tessellation and shading for moving objects')
 
 		self.gui_shutter_open  = GUI_String('config', 'shutter_open',  'Shutter open: ',  180, 20, default = '0.0', help = 'Shutter open time for motion blur')
 		self.gui_shutter_close = GUI_String('config', 'shutter_close', 'Shutter close: ', 180, 20, default = '0.5', help = 'Shutter close time for motion blur')
@@ -4713,14 +4754,12 @@ class GUI_Config(object):
 
 			GUI_Base.line_feed()
 
+			self.gui_ray_motion.draw()
 			self.gui_dice_motionfactor.draw()
 
 	def panel_ray_traced_init(self):
 
-		self.gui_enable_ray_traced         = GUI_Toggle('config', 'enable_ray_traced',         'Enable',         100, default = 0, help = 'Enable ray traced reflections and refractions')
-		self.gui_ray_traced_opaque_shadows = GUI_Toggle('config', 'ray_traced_opaque_shadows', 'Opaque shadows', 100, default = 1, help = 'Enable objects opaque regardless of their shaders')
-		self.gui_ray_displace              = GUI_Toggle('config', 'ray_displace',              'Ray displace',   100, default = 1, help = 'Enable displace objects when ray tracing')
-		self.gui_ray_motion                = GUI_Toggle('config', 'ray_motion',                'Ray motion',     100, default = 0, help = 'Do rays consider motion-blur of objects')
+		self.gui_enable_ray_traced = GUI_Toggle('config', 'enable_ray_traced', 'Enable', 100, default = 0, help = 'Enable ray traced reflections and refractions')
 
 		self.gui_ray_traced_max_depth = GUI_Number('config', 'ray_traced_max_depth','Raytraced max depth: ', 210, 0, 32, default = 1, help = 'Ray traced max depth')
 
@@ -4732,32 +4771,67 @@ class GUI_Config(object):
 
 			self.gui_ray_traced_max_depth.draw()
 
-			GUI_Base.line_feed()
-
-			self.gui_ray_traced_opaque_shadows.draw()
-			self.gui_ray_displace.draw()
-			self.gui_ray_motion.draw()
-
 	def panel_displacement_init(self):
 
-		self.gui_enable_displacements = GUI_Toggle('config', 'enable_displacements', 'Enable', 100, default = 0, help = 'Enable displacements')
+		self.gui_enable_displacements = GUI_Toggle('config', 'enable_displacements', 'Enable',       100, default = 0, help = 'Enable displacements')
+		self.gui_ray_displace         = GUI_Toggle('config', 'ray_displace',         'Ray displace', 100, default = 1, help = 'Enable displace objects when ray tracing')
 
 		self.gui_maxradius = GUI_String('config', 'maxradius', 'Max radius: ', 140, 20, default = '0.0',    help = 'Maximum radial displacement')
 		self.gui_maxspace  = GUI_String('config', 'maxspace',  'Max space: ',  140, 20, default = 'common', help = 'Coordinate system in which max radial displacement is measured')
 
+		self.gui_button_disp_assign = GUI_Button('local', None, 'Assign', 130, func = self.cb_button_disp_assign, help = 'Assign displacement')
+		self.gui_button_disp_remove = GUI_Button('local', None, 'Remove', 130, func = self.cb_button_disp_remove, help = 'Remove assign')
+
+		self.gui_menu_displacement = GUI_Menu('local', None, 130, func = self.cb_menu_displacement, help = 'Select displacement')
+
 	def panel_displacement(self):
 
-		if (self.gui_enable_displacements.val):
+		enable_displacements = self.gui_enable_displacements.val
+
+		if (enable_displacements):
 
 			GUI_Text.draw(self.color_text, 'UV Disp -> dispmap | Disp -> Km', 130, 2, 6)
 			GUI_Base.line_feed()
 
 		self.gui_enable_displacements.draw()
 
-		if (self.gui_enable_displacements.val):
+		if (enable_displacements):
 
+			self.gui_ray_displace.draw()
 			self.gui_maxradius.draw()
 			self.gui_maxspace.draw()
+
+			if (self.list_shaders_displacement):
+
+				materials = Blender.Material.Get()
+
+				if (materials):
+
+					list_materials = [[m.name, m.name] for m in sorted(materials)]
+
+					# displacements assign
+
+					if (self.list_shaders_displacement and list_materials):
+
+						self.draw_shader_help()
+
+						GUI_Base.line_feed()
+
+						self.gui_menu_material.draw('Materials', list_materials)
+
+						material_name = self.gui_menu_material.val
+
+						sd = self.assigned_displacement[1].get(material_name)
+						if (sd is None):
+
+							self.gui_button_disp_assign.draw()
+							self.gui_menu_displacement.draw('Shaders', self.list_shaders_displacement)
+						else:
+							self.gui_button_disp_remove.draw()
+
+							GUI_Base.line_feed()
+
+							sd.draw()
 
 	def panel_rerender_init(self):
 
@@ -5164,7 +5238,12 @@ class GUI_Config(object):
 
 					if (self.gui_enable_scripts.val and list_materials and (material_name is not None)):
 
-						self.active_mat = mat = Blender.Material.Get(material_name)
+						try:
+							mat = Blender.Material.Get(material_name)
+						except:
+							mat = None
+
+						self.active_mat = mat
 
 						if (mat is not None):
 
@@ -5235,7 +5314,7 @@ class GUI_Config(object):
 
 						self.gui_menu_material.draw('Materials', list_materials)
 
-						self.shader_surface = sd = self.assigned_material[1].get(material_name)
+						sd = self.assigned_material[1].get(material_name)
 						if (sd is None):
 
 							self.gui_button_mat_assign.draw()
@@ -5243,7 +5322,6 @@ class GUI_Config(object):
 						else:
 
 							self.gui_button_mat_remove.draw()
-
 
 							if (self.gui_enable_bake_diffuse.val):
 
@@ -5401,7 +5479,7 @@ class GUI_Config(object):
 
 					self.gui_menu_lamp.draw('Lamps', list_lamps)
 
-					self.shader_light = sd = self.assigned_light[1].get(lamp_name)
+					sd = self.assigned_light[1].get(lamp_name)
 					if (sd is None):
 
 						self.gui_button_lamp_assign.draw()
@@ -5586,6 +5664,25 @@ class GUI_Config(object):
 
 				sd.toxml(doc, material)
 
+		# displacements
+
+		for (idx, ds) in enumerate(self.assigned_displacement):
+
+			displacements = doc.createElement('displacements')
+			root.appendChild(displacements)
+			displacements.setAttribute('index', str(idx))
+
+			for (dis, sd) in sorted(ds.iteritems()):
+
+				if (sd is None):
+					continue
+
+				displacement = doc.createElement('displacement')
+				displacements.appendChild(displacement)
+				displacement.setAttribute('name', dis)
+
+				sd.toxml(doc, displacement)
+
 		# lights
 
 		for (idx, lg) in enumerate(self.assigned_light):
@@ -5653,7 +5750,7 @@ class GUI_Config(object):
 			except:
 				sys.excepthook(*sys.exc_info())
 
-	def config_load(self):
+	def config_load(self, first = False):
 
 		sc = Blender.Scene.GetCurrent()
 
@@ -5687,14 +5784,16 @@ class GUI_Config(object):
 				doc = xml.dom.minidom.parseString(''.join(text.asLines()))
 
 			except:
-				print 'Info: XML config "%s" not found, will use default settings' % self.config_filename
+				if (not first):
+					print 'Info: XML config "%s" not found, will use default settings' % self.config_filename
 				return
 
 		else:
 			try:
 				doc = xml.dom.minidom.parse(self.config_filename)
 			except:
-				print 'Info: XML config file "%s" not found, will use default settings' % self.config_filename
+				if (not first):
+					print 'Info: XML config file "%s" not found, will use default settings' % self.config_filename
 				return
 
 		if (doc.documentElement.tagName != ROOT_ELEMENT):
@@ -5776,6 +5875,31 @@ class GUI_Config(object):
 					sys.excepthook(*sys.exc_info())
 
 				self.assigned_material[idx][name] = sd
+
+		# displacements
+
+		for displacement in doc.getElementsByTagName('displacements'):
+
+			index = displacement.getAttribute('index')
+			if (index is None):
+				print 'Error: file "%s", not attribute "index" element "displacements"' % self.config_filename
+				continue
+
+			idx = int(index)
+
+			for dis in displacement.getElementsByTagName('displacement'):
+
+				name = dis.getAttribute('name')
+				if (name is None):
+					continue
+
+				sd = Shader()
+
+				if (not sd.fromxml(dis)):
+					continue
+
+				self.assigned_displacement[idx][name] = sd
+
 
 		# lights
 
@@ -5868,9 +5992,9 @@ def clamp(v, vmin, vmax):
 		return vmax
 	return v
 
-def space2underscore(name):
-	# replace spaces to '_'
-	return re.sub('\s+', '_', name)
+def sanefilename(name):
+	# replace invalid chars to '_'
+	return re.sub('[\s\[\]()<>\\\~!?@#$%^&*=\/:;,\'"]', '_', name)
 
 def fix_file_name(filename):
 	if (os.path.sep == '\\'):
@@ -5968,7 +6092,7 @@ def main():
 	# rename old config file
 
 	try:
-		filename = gelato_gui.config_filename
+		filename     = gelato_gui.config_filename
 		filename_old = filename + '.old'
 
 		if (os.path.exists(filename)):
@@ -5976,8 +6100,10 @@ def main():
 	except:
 		sys.excepthook(*sys.exc_info())
 
-	# load and save config file
+	# load, init, load and save
 
+	gelato_gui.config_load(True)
+	gelato_gui.post_init()
 	gelato_gui.config_load()
 	gelato_gui.config_save()
 
