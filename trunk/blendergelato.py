@@ -3,13 +3,13 @@
 
 """
 Name: 'Blender Gelato'
-Blender: 247
+Blender: 248
 Group: 'Render'
 Tooltip: 'Render with NVIDIA Gelato(TM)'
 """
 
 __author__ = 'Mario Ambrogetti'
-__version__ = '0.18'
+__version__ = '0.19a'
 __url__ = ['http://code.google.com/p/blendergelato/source/browse/trunk/blendergelato.py']
 __bpydoc__ = """\
 Blender(TM) to NVIDIA Gelato(TM) scene converter
@@ -299,24 +299,30 @@ class GUI_Base(type):
 		GUI_Base.offset_y = 0
 
 	@staticmethod
-	def home_down():
-		GUI_Base.offset_y += GUI_Base.step_y
+	def home_move(step_x = 0, step_y = 0):
+		GUI_Base.offset_x += step_x
+		if (GUI_Base.offset_x > 0):
+			GUI_Base.offset_x = 0
+
+		GUI_Base.offset_y += step_y
 		if (GUI_Base.offset_y > 0):
 			GUI_Base.offset_y = 0
 
 	@staticmethod
+	def home_down():
+		GUI_Base.home_move(0, GUI_Base.step_y)
+
+	@staticmethod
 	def home_up():
-		GUI_Base.offset_y -= GUI_Base.step_y
+		GUI_Base.home_move(0, -GUI_Base.step_y)
 
 	@staticmethod
 	def home_right():
-		GUI_Base.offset_x += GUI_Base.step_x
-		if (GUI_Base.offset_x > 0):
-			GUI_Base.offset_x = 0
+		GUI_Base.home_move(GUI_Base.step_x)
 
 	@staticmethod
 	def home_left():
-		GUI_Base.offset_x -= GUI_Base.step_x
+		GUI_Base.home_move(-GUI_Base.step_x)
 
 	@staticmethod
 	def line_feed(gap = True):
@@ -1179,7 +1185,7 @@ class Gelato_pyg(object):
 			(Blender.Texture.ExtendModes.CLIP,     'black'),
 			(Blender.Texture.ExtendModes.CLIPCUBE, 'mirror'),
 			(Blender.Texture.ExtendModes.EXTEND,   'clamp'),
-#			(Blender.Texture.ExtendModes.CHECKER,  'periodic'),
+			(Blender.Texture.ExtendModes.CHECKER,  'periodic'),
 		])
 
 	def generate_instance_name(self, name, ext = '', prefix = '', postfix = '', noframe = False):
@@ -2122,14 +2128,8 @@ class Gelato_pyg(object):
 			return
 
 		mat_name = material.name
-		flags    = material.mode
-
-		# TODO remove >2.47
-		enabled_textures = None
-		try:
-			enabled_textures = material.enabledTextures
-		except:
-			pass
+		flags = material.mode
+		enabled_textures = material.enabledTextures
 
 		# texture files
 
@@ -2141,10 +2141,7 @@ class Gelato_pyg(object):
 		if (list_tex):
 			for (idx, mtex) in enumerate(list_tex):
 
-				if ((enabled_textures is not None) and (idx not in enabled_textures)):
-					continue
-
-				if ((not mtex) or (not mtex.tex)):
+				if ((idx not in enabled_textures) or (not mtex) or (not mtex.tex)):
 					continue
 
 				if (mtex.tex.type is Blender.Texture.Types.IMAGE):
@@ -3159,7 +3156,11 @@ class Gelato_pyg(object):
 
 		if (self.enable_viewer and
 			(self.current_pass in [self.passes.beauty, self.passes.ambient_occlusion, self.passes.bake_diffuse])):
-				title = '%s - %s (%d/%d)' % (self.title, self.scene.name, self.curframe, self.nframes)
+				title = '%s - %s (%d/%d) %s' % (
+					self.title,
+					self.scene.name,
+					self.curframe, self.nframes,
+					datetime.datetime.today().strftime('%T'))
 				self.write_device(title, 'iv', self.data_color, self.camera_name)
 
 		# ambient occlusion
@@ -3545,6 +3546,10 @@ class Gelato_pyg(object):
 class GUI_Config(object):
 
 	def __init__(self):
+		self.middle_button = False
+		self.mouse_old_x = 0
+		self.mouse_old_y = 0
+
 		self.active_obj = None
 		self.active_mat = None
 
@@ -3739,6 +3744,24 @@ class GUI_Config(object):
 		self.panel_select()
 
 	def handle_event(self, evt, val):
+
+		# move widgets
+
+		if (Blender.Window.GetMouseButtons() & Blender.Window.MButs.M):
+
+			(mouse_x, mouse_y) = Blender.Window.GetMouseCoords()
+
+			if (self.middle_button):
+				GUI_Base.home_move(mouse_x - self.mouse_old_x, mouse_y - self.mouse_old_y)
+				Blender.Draw.Draw()
+			else:
+				self.middle_button = True
+
+			self.mouse_old_x = mouse_x
+			self.mouse_old_y = mouse_y
+			return
+
+		self.middle_button = False
 
 		# active object
 
